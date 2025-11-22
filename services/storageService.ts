@@ -3,7 +3,6 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../constants';
 import { createClient } from '@supabase/supabase-js';
 
 const DATA_KEY = 'routine_tracker_data';
-const CONFIG_KEY = 'routine_tracker_config';
 
 // Initialize Supabase Client
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -17,6 +16,10 @@ export const getStoredData = (): Record<string, DayData> => {
 
 export const saveStoredData = (data: Record<string, DayData>) => {
   localStorage.setItem(DATA_KEY, JSON.stringify(data));
+};
+
+export const clearLocalData = () => {
+  localStorage.removeItem(DATA_KEY);
 };
 
 // --- Supabase Integration ---
@@ -83,5 +86,25 @@ export const loadFromCloud = async (): Promise<CloudResult> => {
 
   } catch (error: any) {
     return { success: false, message: "Erro ao conectar com Supabase", error: error.message };
+  }
+};
+
+/**
+ * Apaga TODO o histórico do banco de dados (PERIGO)
+ */
+export const clearAllCloudData = async (): Promise<boolean> => {
+  try {
+    // Supabase requer um filtro para deletar. Usamos um filtro que pega todas as datas válidas
+    // 'neq' significa "not equal". Deletar tudo que a data não for 'infinity'.
+    const { error } = await supabase
+      .from('daily_logs')
+      .delete()
+      .neq('date', 'infinity'); 
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error("Failed to clear database:", error);
+    return false;
   }
 };

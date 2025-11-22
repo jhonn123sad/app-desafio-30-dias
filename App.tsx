@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, CloudCheck, Cloud } from 'lucide-react';
+import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, CloudCheck, Cloud, AlertTriangle, X } from 'lucide-react';
 import { Task, Period, DayData } from './types';
 import { INITIAL_TASKS, TOTAL_POSSIBLE_POINTS } from './constants';
-import { getStoredData, saveStoredData, syncWithCloud, loadFromCloud } from './services/storageService';
+import { getStoredData, saveStoredData, syncWithCloud, loadFromCloud, clearAllCloudData, clearLocalData } from './services/storageService';
 import { ProgressChart } from './components/Chart';
 import { ConfigModal } from './components/ConfigModal';
 
@@ -14,6 +14,9 @@ const App: React.FC = () => {
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
+  
+  // Confirmation Modal State
+  const [isResetDayModalOpen, setIsResetDayModalOpen] = useState(false);
 
   // Initialize & Auto-Sync
   useEffect(() => {
@@ -97,34 +100,51 @@ const App: React.FC = () => {
     saveStoredData(newHistory);
   };
 
-  const handleResetDay = async () => {
-    if (confirm('Tem certeza que deseja resetar os dados deste dia?')) {
-      setIsSyncing(true); // Show saving spinner during reset
-      
-      // 1. Reset State
-      const resetTasks = tasks.map(t => ({ ...t, completed: false }));
-      setTasks(resetTasks);
-      
-      // 2. Prepare Empty Data
-      const emptyDayData: DayData = {
-          date: currentDate,
-          totalPoints: 0,
-          tasks: resetTasks.reduce((acc, t) => ({ ...acc, [t.id]: false }), {})
-      };
+  // Trigger Reset Confirmation
+  const onResetDayClick = () => {
+    setIsResetDayModalOpen(true);
+  };
 
-      // 3. Update Local
-      const newHistory = {
-        ...history,
-        [currentDate]: emptyDayData
-      };
-      setHistory(newHistory);
-      saveStoredData(newHistory);
+  // Actual Reset Logic (Called by Modal)
+  const confirmResetCurrentDay = async () => {
+    setIsResetDayModalOpen(false);
+    setIsSyncing(true); 
+    
+    // 1. Reset State
+    const resetTasks = tasks.map(t => ({ ...t, completed: false }));
+    setTasks(resetTasks);
+    
+    // 2. Prepare Empty Data
+    const emptyDayData: DayData = {
+        date: currentDate,
+        totalPoints: 0,
+        tasks: resetTasks.reduce((acc, t) => ({ ...acc, [t.id]: false }), {})
+    };
 
-      // 4. Force Sync to Cloud (Critical Fix)
-      // We must tell Supabase that this day is now empty, otherwise auto-sync will bring back old data
-      await syncWithCloud(emptyDayData);
-      
-      setIsSyncing(false);
+    // 3. Update Local
+    const newHistory = {
+      ...history,
+      [currentDate]: emptyDayData
+    };
+    setHistory(newHistory);
+    saveStoredData(newHistory);
+
+    // 4. Force Sync to Cloud
+    await syncWithCloud(emptyDayData);
+    
+    setIsSyncing(false);
+  };
+
+  // Reseta TUDO (Passado para o Modal)
+  const handleFullReset = async () => {
+    const success = await clearAllCloudData();
+    if (success) {
+      clearLocalData();
+      setHistory({});
+      setTasks(INITIAL_TASKS.map(t => ({ ...t, completed: false })));
+      // Removed alert for better UI flow, handled inside modal mostly or implicitly
+    } else {
+      console.error("Erro ao apagar histórico");
     }
   };
 
@@ -139,12 +159,6 @@ const App: React.FC = () => {
     const success = await syncWithCloud(todayData);
     
     setIsSyncing(false);
-
-    if (success) {
-        // Subtle feedback
-    } else {
-        alert("Erro na sincronização. Verifique sua conexão.");
-    }
   };
 
   // Helper to filter tasks
@@ -191,9 +205,9 @@ const App: React.FC = () => {
                 {isSyncing ? 'Salvando...' : 'Salvar'}
             </button>
             <button 
-              onClick={handleResetDay}
+              onClick={onResetDayClick}
               className="p-2.5 bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400 rounded-lg border border-slate-700 transition-colors"
-              title="Resetar Dia Atual"
+              title="Resetar apenas o dia atual"
             >
               <RotateCcw className="w-5 h-5" />
             </button>
@@ -285,9 +299,37 @@ const App: React.FC = () => {
         </div>
       </div>
 
+      {/* Day Reset Confirmation Modal */}
+      {isResetDayModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-slate-800 rounded-xl w-full max-w-md border border-slate-700 shadow-2xl p-6">
+            <h3 className="text-lg font-bold text-white mb-2">Resetar dia?</h3>
+            <p className="text-slate-400 text-sm mb-6">
+              Você tem certeza que deseja limpar todas as tarefas de <strong>hoje</strong> ({currentDate})? 
+              <br/>Isso não afetará os outros dias.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button 
+                onClick={() => setIsResetDayModalOpen(false)}
+                className="px-4 py-2 rounded-lg text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={confirmResetCurrentDay}
+                className="px-4 py-2 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 font-semibold transition-colors"
+              >
+                Sim, limpar dia
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConfigModal 
         isOpen={isConfigOpen} 
-        onClose={() => setIsConfigOpen(false)} 
+        onClose={() => setIsConfigOpen(false)}
+        onResetAll={handleFullReset}
       />
     </div>
   );
