@@ -51,7 +51,7 @@ const normalizeBoolean = (value: any): boolean => {
     return false;
 };
 
-const cleanKey = (key: string) => key.toString().toLowerCase().trim().replace(/[^a-z0-9]/g, "");
+const cleanKey = (key: string) => key ? key.toString().toLowerCase().trim().replace(/[^a-z0-9]/g, "") : "";
 
 const fuzzyMatch = (key1: string, key2: string): boolean => {
     if (!key1 || !key2) return false;
@@ -74,7 +74,15 @@ interface LoadResult {
     debug?: string;
 }
 
-// Diagnostic function
+// Helper to safely get text from response even if not JSON
+const safeGetText = async (response: Response) => {
+    try {
+        return await response.text();
+    } catch (e) {
+        return "Erro ao ler corpo da resposta.";
+    }
+};
+
 export const diagnoseSheetConnection = async (scriptUrl: string): Promise<any> => {
     try {
         const response = await fetch(scriptUrl);
@@ -86,35 +94,58 @@ export const diagnoseSheetConnection = async (scriptUrl: string): Promise<any> =
         } catch (e) {
             return {
                 status: response.status,
-                error: "Não foi possível ler o JSON. A resposta não é um JSON válido.",
-                rawPreview: text.substring(0, 500) // Show HTML or error text
+                error: "O retorno não é um JSON válido.",
+                rawPreview: text.substring(0, 1000) // Mostra o HTML ou erro texto
             };
         }
 
+        // Deep search for rows
         let rows: any[] = [];
         let structureType = "Unknown";
+        let headersDetected = [];
 
         if (Array.isArray(json)) {
             rows = json;
-            structureType = "Array Root";
+            structureType = "Raiz é Array";
         } else if (typeof json === 'object') {
-            if (Array.isArray(json.data)) { rows = json.data; structureType = "Object with .data"; }
-            else if (Array.isArray(json.values)) { rows = json.values; structureType = "Object with .values"; }
-            else if (Array.isArray(json.items)) { rows = json.items; structureType = "Object with .items"; }
-            else {
-                const arr = Object.values(json).find(v => Array.isArray(v));
-                if (arr) { rows = arr as any[]; structureType = "Object with auto-detected array"; }
-                else { rows = [json]; structureType = "Single Object"; }
+            // Procura a maior array dentro do objeto
+            const candidates = Object.entries(json).filter(([k, v]) => Array.isArray(v));
+            if (candidates.length > 0) {
+                // Pega a array com mais itens ou a primeira
+                const bestCandidate = candidates.sort((a: any, b: any) => b[1].length - a[1].length)[0];
+                rows = bestCandidate[1] as any[];
+                structureType = `Objeto com propriedade '${bestCandidate[0]}'`;
+            } else {
+                // Fallback: O próprio objeto pode ser um item único?
+                rows = [json];
+                structureType = "Objeto Único (provavelmente errado)";
             }
+        }
+
+        // Check first row
+        if (rows.length > 0) {
+             const firstRow = rows[0];
+             if (Array.isArray(firstRow)) {
+                 structureType += " (Array de Arrays)";
+                 // Try to find string headers
+                 if (firstRow.every(c => typeof c === 'string')) {
+                     headersDetected = firstRow;
+                 } else {
+                     headersDetected = firstRow.map((_, i) => `col_${i}`);
+                 }
+             } else if (typeof firstRow === 'object') {
+                 structureType += " (Array de Objetos)";
+                 headersDetected = Object.keys(firstRow);
+             }
         }
 
         return {
             status: response.status,
             rowCount: rows.length,
             structureType,
-            headersDetected: rows.length > 0 ? (typeof rows[0] === 'object' ? Object.keys(rows[0]) : ['Raw Array']) : [],
+            headersDetected,
             firstRowSample: rows.length > 0 ? rows[0] : null,
-            rawJsonSnippet: JSON.stringify(json).substring(0, 300) + "..."
+            rawJsonSnippet: JSON.stringify(json, null, 2)
         };
     } catch (error: any) {
         return { error: error.message };
@@ -126,122 +157,169 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
 
   try {
     const response = await fetch(scriptUrl);
+    const responseText = await response.text();
+    
     if (!response.ok) return { success: false, data: null, message: `Erro HTTP: ${response.status}` };
 
-    const rawData = await response.json();
+    let rawData;
+    try {
+        rawData = JSON.parse(responseText);
+    } catch (e) {
+        return { 
+            success: false, 
+            data: null, 
+            message: "Resposta não é JSON válido.", 
+            debug: `Preview da resposta:\n${responseText.substring(0, 200)}...` 
+        };
+    }
     
-    // 1. Robust Structure Detection
+    // 1. ROBUST STRUCTURE DETECTION
+    // Find the array with data anywhere in the object
     let potentialRows: any[] = [];
-    if (Array.isArray(rawData)) potentialRows = rawData;
-    else if (rawData && typeof rawData === 'object') {
+    
+    if (Array.isArray(rawData)) {
+        potentialRows = rawData;
+    } else if (rawData && typeof rawData === 'object') {
+         // Prioritize common names
          if (Array.isArray(rawData.data)) potentialRows = rawData.data;
          else if (Array.isArray(rawData.values)) potentialRows = rawData.values;
          else if (Array.isArray(rawData.items)) potentialRows = rawData.items;
          else if (Array.isArray(rawData.rows)) potentialRows = rawData.rows;
          else {
-             // Fallback: find any property that is an array
-             const possibleArray = Object.values(rawData).find(v => Array.isArray(v));
-             if (possibleArray) potentialRows = possibleArray as any[];
-             else potentialRows = [rawData]; 
+             // Brute force: find ANY array property
+             const keys = Object.keys(rawData);
+             for(const k of keys) {
+                 if (Array.isArray(rawData[k])) {
+                     potentialRows = rawData[k];
+                     break;
+                 }
+             }
+             // If still nothing, maybe rawData itself is the single row object?
+             if (potentialRows.length === 0 && Object.keys(rawData).length > 0) {
+                 potentialRows = [rawData];
+             }
          }
     }
 
-    if (!potentialRows.length) return { success: false, data: null, message: "Planilha vazia ou formato inválido." };
+    if (!potentialRows.length) return { success: false, data: null, message: "Planilha vazia ou estrutura irreconhecível." };
 
-    // 2. Normalize Rows (Handle Array of Arrays vs Array of Objects)
-    let processedRows = potentialRows;
-    // If the first item is an array, it's likely [["Header1", "Header2"], ["Val1", "Val2"]]
-    // OR it's a list of values without headers if the script is simple.
-    // We assume if it's a 2D array, Row 0 = Headers.
+    // 2. NORMALIZE ROWS (Array of Arrays vs Array of Objects)
+    let processedRows: any[] = [];
+    
+    // Check if it's a 2D Array (Values only or Headers+Values)
     if (Array.isArray(potentialRows[0])) {
-         const headers = potentialRows[0].map(String);
-         processedRows = potentialRows.slice(1).map((row: any[]) => {
+        // Heuristic: Find the header row. It usually contains mostly strings.
+        // Check top 5 rows.
+        let headerRowIndex = -1;
+        const maxScan = Math.min(potentialRows.length, 5);
+        
+        for(let i=0; i < maxScan; i++) {
+            const row = potentialRows[i];
+            if (Array.isArray(row) && row.length > 0) {
+                const stringCount = row.filter(c => typeof c === 'string').length;
+                // If > 80% are strings, assume headers
+                if (stringCount / row.length > 0.8) {
+                    headerRowIndex = i;
+                    break;
+                }
+            }
+        }
+
+        let headers: string[] = [];
+        let dataStartIndex = 0;
+
+        if (headerRowIndex !== -1) {
+            headers = potentialRows[headerRowIndex].map(String);
+            dataStartIndex = headerRowIndex + 1;
+        } else {
+            // No headers found? Generate artificial ones (col_0, col_1...)
+            // We assume the first row IS data then.
+            const maxCols = Math.max(...potentialRows.map((r: any) => Array.isArray(r) ? r.length : 0));
+            for(let c=0; c<maxCols; c++) headers.push(`col_${c}`);
+            dataStartIndex = 0;
+        }
+
+        // Process rows into objects
+        processedRows = potentialRows.slice(dataStartIndex).map((row: any) => {
+             // Skip if row is not an array or empty
+             if (!Array.isArray(row)) return null;
              const obj: any = {};
-             headers.forEach((h, i) => obj[h] = row[i]);
+             headers.forEach((h, i) => {
+                 // Use 'col_i' if header is empty string
+                 const key = h ? h : `col_${i}`;
+                 obj[key] = row[i];
+             });
              return obj;
-         });
+        }).filter(r => r !== null);
+
+    } else {
+        // Already objects
+        processedRows = potentialRows;
     }
 
-    if (processedRows.length === 0) return { success: false, data: null, message: "Sem dados para processar." };
+    if (processedRows.length === 0) return { success: false, data: null, message: "Nenhum dado válido encontrado após processamento." };
 
     const firstRow = processedRows[0];
     const rowKeys = Object.keys(firstRow);
 
-    // 3. Advanced Date Column Detection
-    
-    // Strategy A: Name match
+    // 3. ROBUST DATE COLUMN DETECTION
     let dateKey = rowKeys.find(k => {
         const c = cleanKey(k);
-        return c === 'data' || c === 'date' || c === 'dia' || c === 'timestamp' || c === 'dt';
+        return ['data', 'date', 'dia', 'dt', 'timestamp', 'created', 'when'].some(t => c.includes(t));
     });
-    
-    // Strategy B: Content Scan (Check first 5 rows)
-    if (!dateKey) {
-        const sampleRows = processedRows.slice(0, 5);
-        const columnScores: Record<string, number> = {};
-        
-        for (const k of rowKeys) {
-            let validDates = 0;
-            for (const row of sampleRows) {
-                if (looksLikeDate(row[k])) validDates++;
-            }
-            if (validDates > 0) columnScores[k] = validDates;
-        }
-        
-        // Pick column with most valid dates
-        const bestCol = Object.keys(columnScores).sort((a, b) => columnScores[b] - columnScores[a])[0];
-        if (bestCol) dateKey = bestCol;
-    }
 
-    // Strategy C: Force Index 0 (The "Column A" fallback)
+    // Fallback: Force Index 0 (Column A) if no name match
     if (!dateKey && rowKeys.length > 0) {
-        // If the first column has *any* data, assume it's the date column as a last resort
-        // But verify it looks vaguely like a date or string
-        const firstColKey = rowKeys[0];
-        const val = firstRow[firstColKey];
-        if (looksLikeDate(val) || (typeof val === 'string' && val.length >= 8)) {
-            dateKey = firstColKey;
-        }
+        // If user says "Column A is Date", it's likely the first key in the object
+        // (Object keys order is generally preserved for JSON)
+        dateKey = rowKeys[0];
     }
 
     if (!dateKey) {
         return { 
             success: false, 
             data: null, 
-            message: "Coluna de Data não encontrada.",
-            debug: `Chaves detectadas: [${rowKeys.join(', ')}].\nValor da primeira coluna (exemplo): ${rowKeys.length ? firstRow[rowKeys[0]] : 'N/A'}`
+            message: "Não foi possível identificar a coluna de Data.",
+            debug: `Chaves encontradas: [${rowKeys.join(', ')}]`
         };
     }
 
     const normalizedData: Record<string, DayData> = {};
+    let processedCount = 0;
 
     processedRows.forEach((row: any) => {
         const valDate = row[dateKey!];
         let dateStr = '';
         
-        // Date Parsing Logic
-        if (typeof valDate === 'string') {
-             const match = valDate.match(/\d{4}-\d{2}-\d{2}/); // YYYY-MM-DD
-             if (match) dateStr = match[0];
-             else {
-                 const brMatch = valDate.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); // DD/MM/YYYY
-                 if (brMatch) {
-                     const y = brMatch[3].length === 2 ? `20${brMatch[3]}` : brMatch[3];
-                     const m = brMatch[2].padStart(2, '0');
-                     const d = brMatch[1].padStart(2, '0');
-                     dateStr = `${y}-${m}-${d}`;
+        // Generic Date Parsing
+        if (valDate) {
+            if (typeof valDate === 'string') {
+                // Try YYYY-MM-DD
+                const isoMatch = valDate.match(/\d{4}-\d{2}-\d{2}/);
+                if (isoMatch) dateStr = isoMatch[0];
+                else {
+                    // Try DD/MM/YYYY
+                    const brMatch = valDate.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+                    if (brMatch) {
+                        let y = brMatch[3];
+                        if (y.length === 2) y = '20' + y;
+                        const m = brMatch[2].padStart(2, '0');
+                        const d = brMatch[1].padStart(2, '0');
+                        dateStr = `${y}-${m}-${d}`;
+                    } else {
+                        // Try native parse
+                        const d = new Date(valDate);
+                        if (!isNaN(d.getTime())) dateStr = d.toISOString().split('T')[0];
+                    }
+                }
+            } else if (typeof valDate === 'number') {
+                 // Excel Serial Date
+                 if (valDate > 30000) {
+                    const d = new Date((valDate - 25569) * 86400 * 1000);
+                    dateStr = d.toISOString().split('T')[0];
                  }
-             }
-             // Try generic Date parse if manual regex failed
-             if (!dateStr) {
-                 const d = new Date(valDate);
-                 if (!isNaN(d.getTime())) dateStr = d.toISOString().split('T')[0];
-             }
-        } else if (typeof valDate === 'number') {
-            // Excel date (approximate)
-            if (valDate > 30000) {
-                const d = new Date((valDate - 25569) * 86400 * 1000);
-                dateStr = d.toISOString().split('T')[0];
+            } else if (valDate instanceof Date) {
+                dateStr = valDate.toISOString().split('T')[0];
             }
         }
 
@@ -250,20 +328,23 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
         const tasksMap: Record<string, boolean> = {};
         const currentRowKeys = Object.keys(row);
 
+        // Map Tasks
         INITIAL_TASKS.forEach(task => {
-            const matchingKey = currentRowKeys.find(k => fuzzyMatch(k, task.id));
+            // Try to find matching column
+            const matchingKey = currentRowKeys.find(k => fuzzyMatch(k, task.id) || fuzzyMatch(k, task.label));
+            
             if (matchingKey) {
                 tasksMap[task.id] = normalizeBoolean(row[matchingKey]);
             } else {
+                // If using artificial keys (col_0, col_1), we can't map by name.
+                // But we can leave it false. The User will see tasks unchecked.
+                // This is better than failing entirely.
                 tasksMap[task.id] = false;
             }
         });
 
-        // Find points column
-        const pointKey = currentRowKeys.find(k => {
-            const c = cleanKey(k);
-            return c.includes('ponto') || c.includes('total');
-        });
+        // Find points (optional)
+        const pointKey = currentRowKeys.find(k => cleanKey(k).includes('ponto') || cleanKey(k).includes('total'));
         const points = pointKey ? Number(row[pointKey]) : 0;
 
         normalizedData[dateStr] = {
@@ -271,15 +352,17 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
             totalPoints: isNaN(points) ? 0 : points,
             tasks: tasksMap
         };
+        processedCount++;
     });
 
     return { 
         success: true, 
         data: normalizedData, 
-        message: `${Object.keys(normalizedData).length} dias processados com sucesso.` 
+        message: `${processedCount} dias recuperados com sucesso.`,
+        debug: processedCount === 0 ? "Nenhum dia válido processado. Verifique o formato das datas." : undefined
     };
 
   } catch (error: any) {
-    return { success: false, data: null, message: "Erro ao processar JSON.", debug: error.message };
+    return { success: false, data: null, message: "Erro crítico no processamento.", debug: error.message };
   }
 };
