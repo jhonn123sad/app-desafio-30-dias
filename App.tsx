@@ -121,7 +121,7 @@ const App: React.FC = () => {
         return;
     }
 
-    if (!confirm("Isso irá buscar o histórico da planilha. Dados locais de dias conflitantes serão atualizados pelo que está na planilha. Continuar?")) {
+    if (!confirm("Isso irá buscar o histórico da planilha. Dados locais de dias conflitantes serão substituídos. Continuar?")) {
         return;
     }
 
@@ -143,9 +143,9 @@ const App: React.FC = () => {
     } else {
         // Se retornou null ou vazio
         if (cloudData === null) {
-             alert("Erro crítico de conexão. Verifique se o Web App do Google Script está implantado como 'Executável por qualquer pessoa' (Anyone).");
+             alert("Erro de conexão com o Google Sheets. Verifique se o link do script está correto.");
         } else {
-             alert("Conexão feita, mas nenhum registro válido foi encontrado. Verifique se sua planilha tem a coluna 'Data' preenchida no formato AAAA-MM-DD e se há dados nas linhas.");
+             alert("Conexão bem sucedida, mas o sistema não conseguiu ler as colunas da planilha.\n\nCertifique-se que a primeira coluna se chama 'Data' e que as outras colunas têm os nomes exatos das tarefas (ex: 'vacum', 'leitura', etc) ou verifique se há dados preenchidos.");
         }
     }
   };

@@ -1,5 +1,6 @@
 import { Period, Task } from './types';
 
+// Updated script URL
 export const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbytBmFgpnlke6BO12rKHjKh0o3U9688ibkv7esgeHBJMuL0r9MS0O7GRQ7sdBVqYbS7qQ/exec';
 
 export const INITIAL_TASKS: Task[] = [

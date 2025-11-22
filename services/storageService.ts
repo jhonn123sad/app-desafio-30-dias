@@ -46,9 +46,14 @@ const normalizeBoolean = (value: any): boolean => {
     if (typeof value === 'number') return value === 1;
     if (typeof value === 'string') {
         const lower = value.toLowerCase().trim();
+        // Adicionado suporte explícito para Sim/Não
         return ['sim', 's', 'true', 'yes', 'y', 'verdadeiro', '1'].includes(lower);
     }
     return false;
+};
+
+const normalizeKey = (key: string): string => {
+    return key.toLowerCase().replace(/_/g, '').replace(/\s+/g, '').trim();
 };
 
 export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<string, DayData> | null> => {
@@ -62,25 +67,40 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<st
         throw new Error(`Network response was not ok: ${response.statusText}`);
     }
 
-    const rawData = await response.json();
-    console.log("Dados brutos recebidos:", rawData);
+    let rawData = await response.json();
+    console.log("Dados brutos recebidos (amostra):", Array.isArray(rawData) ? rawData.slice(0, 2) : rawData);
     
-    if (rawData.error) {
+    if (rawData && rawData.error) {
         console.error("Google Script Error:", rawData.error);
         return null;
     }
 
-    // Determine array of rows
     let rows: any[] = [];
+    
+    // Normalização da estrutura de entrada (Array de Objetos ou Array de Arrays)
     if (Array.isArray(rawData)) {
-        rows = rawData;
+        // Verifica se é uma matriz 2D (values sem headers) ou lista de objetos
+        if (rawData.length > 0 && Array.isArray(rawData[0])) {
+            // É uma matriz 2D. A primeira linha são os headers.
+            const headers = rawData[0].map((h: any) => String(h));
+            const dataRows = rawData.slice(1);
+            
+            rows = dataRows.map((rowArray: any[]) => {
+                const obj: any = {};
+                headers.forEach((header: string, index: number) => {
+                    obj[header] = rowArray[index];
+                });
+                return obj;
+            });
+        } else {
+            // Já é lista de objetos
+            rows = rawData;
+        }
     } else if (typeof rawData === 'object' && rawData !== null) {
-         // Try to find an array property
          const arrayProp = Object.values(rawData).find(val => Array.isArray(val));
          if (arrayProp) {
              rows = arrayProp as any[];
          } else {
-             // Treat object values as rows
              rows = Object.values(rawData);
          }
     }
@@ -92,64 +112,61 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<st
     rows.forEach((row: any) => {
         if (!row || typeof row !== 'object') return;
 
-        // 1. Find Date Column (Case Insensitive)
-        const keys = Object.keys(row);
-        const dateKeyMatch = keys.find(k => ['data', 'date', 'dia'].includes(k.toLowerCase().trim()));
+        // Cria um mapa de chaves normalizadas para facilitar a busca
+        // Ex: "Pontos Total" -> "pontostotal", "Data" -> "data", "vacum" -> "vacum"
+        const rowKeys = Object.keys(row);
+        const normalizedRowMap: Record<string, any> = {};
         
-        if (!dateKeyMatch) return;
+        rowKeys.forEach(key => {
+            const cleanKey = normalizeKey(key);
+            normalizedRowMap[cleanKey] = row[key];
+        });
+
+        // 1. Encontrar a Data
+        // Procura por chaves comuns: 'data', 'date', 'dia'
+        let rawDate = normalizedRowMap['data'] || normalizedRowMap['date'] || normalizedRowMap['dia'];
         
-        let rawDate = row[dateKeyMatch];
         let dateKey = '';
         
         try {
             if (rawDate) {
+                // Se vier do Excel/Sheets as vezes vem como número serial, mas assumindo string YYYY-MM-DD do print
                 if (typeof rawDate === 'string') {
                     if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-                        // Already YYYY-MM-DD
                         dateKey = rawDate;
                     } else if (rawDate.includes('T')) {
-                        // ISO String
                         dateKey = rawDate.split('T')[0];
                     } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(rawDate)) {
-                        // DD/MM/YYYY
                         const [d, m, y] = rawDate.split('/');
-                        dateKey = `${y}-${m}-${d}`;
+                        dateKey = `${y}-${m}-${d}`; // Converte para ISO
                     } else {
-                        // Try Date constructor as fallback
-                        const d = new Date(rawDate);
-                        if (!isNaN(d.getTime())) {
-                             dateKey = d.toISOString().split('T')[0];
-                        }
+                         // Tenta converter data genérica
+                         const d = new Date(rawDate);
+                         if (!isNaN(d.getTime())) dateKey = d.toISOString().split('T')[0];
                     }
-                } else if (rawDate instanceof Date) { // Unlikely from JSON but handled
-                     dateKey = rawDate.toISOString().split('T')[0];
                 }
             }
         } catch (e) {
-            console.warn("Date parse error", rawDate);
+            console.warn("Erro ao processar data:", rawDate);
         }
 
-        if (!dateKey) return;
+        if (!dateKey) return; // Pula linha se não tiver data válida
 
-        // 2. Find Total Points (Case Insensitive)
-        const pointsKeyMatch = keys.find(k => 
-            ['pontostotal', 'pontos total', 'totalpoints', 'total points', 'points'].includes(k.toLowerCase().replace(/_/g, ' ').trim())
-        );
-        const points = pointsKeyMatch ? Number(row[pointsKeyMatch]) || 0 : 0;
+        // 2. Encontrar Pontos
+        // Busca 'pontostotal', 'totalpoints', 'pontos'
+        const pointsVal = normalizedRowMap['pontostotal'] || normalizedRowMap['totalpoints'] || normalizedRowMap['pontos'];
+        const points = Number(pointsVal) || 0;
 
-        // 3. Map Tasks
+        // 3. Mapear Tarefas
         const taskMap: Record<string, boolean> = {};
 
         INITIAL_TASKS.forEach(task => {
-            // Try exact match first
-            let val = row[task.id];
+            // Normaliza o ID da tarefa (ex: minoxidil_1 -> minoxidil1) para busca
+            const searchKey = normalizeKey(task.id);
             
-            // If not found, try case insensitive match
-            if (val === undefined) {
-                const taskKeyMatch = keys.find(k => k.toLowerCase().trim() === task.id.toLowerCase().trim());
-                if (taskKeyMatch) val = row[taskKeyMatch];
-            }
-
+            // Tenta achar o valor usando a chave normalizada
+            const val = normalizedRowMap[searchKey];
+            
             taskMap[task.id] = normalizeBoolean(val);
         });
 
@@ -160,7 +177,7 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<st
         };
     });
 
-    console.log("Dados processados:", Object.keys(normalizedData).length);
+    console.log(`Sucesso! ${Object.keys(normalizedData).length} dias processados.`);
     return normalizedData;
   } catch (error) {
     console.error("Load failed full error:", error);
