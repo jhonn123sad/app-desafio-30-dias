@@ -51,20 +51,20 @@ const normalizeBoolean = (value: any): boolean => {
     return false;
 };
 
-// Fuzzy matcher: removes non-alphanumeric to compare "Minoxidil 1" with "minoxidil_1"
+const cleanKey = (key: string) => key.toString().toLowerCase().trim().replace(/[^a-z0-9]/g, "");
+
 const fuzzyMatch = (key1: string, key2: string): boolean => {
     if (!key1 || !key2) return false;
-    const n1 = key1.toString().toLowerCase().replace(/[^a-z0-9]/g, "");
-    const n2 = key2.toString().toLowerCase().replace(/[^a-z0-9]/g, "");
-    return n1 === n2;
+    return cleanKey(key1) === cleanKey(key2);
 };
 
 const looksLikeDate = (val: any): boolean => {
     if (!val) return false;
-    if (typeof val === 'number' && val > 40000) return true; 
+    if (typeof val === 'number' && val > 30000 && val < 60000) return true; // Excel serial date
     if (typeof val !== 'string') return false;
     const s = val.trim();
-    return /^\d{4}-\d{2}-\d{2}/.test(s) || /^\d{2}\/\d{2}\/\d{4}/.test(s);
+    // Matches YYYY-MM-DD, DD/MM/YYYY, or ISO strings starting with year
+    return /^\d{4}-\d{2}-\d{2}/.test(s) || /^\d{2}\/\d{2}\/\d{4}/.test(s) || /^\d{4}-\d{2}-\d{2}T/.test(s);
 };
 
 interface LoadResult {
@@ -74,7 +74,7 @@ interface LoadResult {
     debug?: string;
 }
 
-// Diagnostic function to help user debug the connection
+// Diagnostic function
 export const diagnoseSheetConnection = async (scriptUrl: string): Promise<any> => {
     try {
         const response = await fetch(scriptUrl);
@@ -86,23 +86,35 @@ export const diagnoseSheetConnection = async (scriptUrl: string): Promise<any> =
         } catch (e) {
             return {
                 status: response.status,
-                error: "Não foi possível ler o JSON. A URL pode estar retornando HTML (página de login ou erro).",
-                rawPreview: text.substring(0, 200)
+                error: "Não foi possível ler o JSON. A resposta não é um JSON válido.",
+                rawPreview: text.substring(0, 500) // Show HTML or error text
             };
         }
 
         let rows: any[] = [];
-        if (Array.isArray(json)) rows = json;
-        else if (typeof json === 'object' && json.data && Array.isArray(json.data)) rows = json.data;
-        else if (typeof json === 'object') rows = Object.values(json).filter(v => Array.isArray(v)).flat();
-        else rows = [json];
+        let structureType = "Unknown";
+
+        if (Array.isArray(json)) {
+            rows = json;
+            structureType = "Array Root";
+        } else if (typeof json === 'object') {
+            if (Array.isArray(json.data)) { rows = json.data; structureType = "Object with .data"; }
+            else if (Array.isArray(json.values)) { rows = json.values; structureType = "Object with .values"; }
+            else if (Array.isArray(json.items)) { rows = json.items; structureType = "Object with .items"; }
+            else {
+                const arr = Object.values(json).find(v => Array.isArray(v));
+                if (arr) { rows = arr as any[]; structureType = "Object with auto-detected array"; }
+                else { rows = [json]; structureType = "Single Object"; }
+            }
+        }
 
         return {
             status: response.status,
             rowCount: rows.length,
-            headersDetected: rows.length > 0 ? Object.keys(rows[0]) : [],
+            structureType,
+            headersDetected: rows.length > 0 ? (typeof rows[0] === 'object' ? Object.keys(rows[0]) : ['Raw Array']) : [],
             firstRowSample: rows.length > 0 ? rows[0] : null,
-            rawStructure: Array.isArray(json) ? "Array" : "Object"
+            rawJsonSnippet: JSON.stringify(json).substring(0, 300) + "..."
         };
     } catch (error: any) {
         return { error: error.message };
@@ -118,19 +130,29 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
 
     const rawData = await response.json();
     
+    // 1. Robust Structure Detection
     let potentialRows: any[] = [];
     if (Array.isArray(rawData)) potentialRows = rawData;
     else if (rawData && typeof rawData === 'object') {
-         // Try to find the array inside the object
-         const possibleArray = Object.values(rawData).find(v => Array.isArray(v));
-         if (possibleArray) potentialRows = possibleArray as any[];
-         else potentialRows = [rawData]; // Maybe it's a single object?
+         if (Array.isArray(rawData.data)) potentialRows = rawData.data;
+         else if (Array.isArray(rawData.values)) potentialRows = rawData.values;
+         else if (Array.isArray(rawData.items)) potentialRows = rawData.items;
+         else if (Array.isArray(rawData.rows)) potentialRows = rawData.rows;
+         else {
+             // Fallback: find any property that is an array
+             const possibleArray = Object.values(rawData).find(v => Array.isArray(v));
+             if (possibleArray) potentialRows = possibleArray as any[];
+             else potentialRows = [rawData]; 
+         }
     }
 
     if (!potentialRows.length) return { success: false, data: null, message: "Planilha vazia ou formato inválido." };
 
-    // Normalize rows if they are arrays (headers in row 0) vs objects
+    // 2. Normalize Rows (Handle Array of Arrays vs Array of Objects)
     let processedRows = potentialRows;
+    // If the first item is an array, it's likely [["Header1", "Header2"], ["Val1", "Val2"]]
+    // OR it's a list of values without headers if the script is simple.
+    // We assume if it's a 2D array, Row 0 = Headers.
     if (Array.isArray(potentialRows[0])) {
          const headers = potentialRows[0].map(String);
          processedRows = potentialRows.slice(1).map((row: any[]) => {
@@ -142,20 +164,43 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
 
     if (processedRows.length === 0) return { success: false, data: null, message: "Sem dados para processar." };
 
-    const normalizedData: Record<string, DayData> = {};
     const firstRow = processedRows[0];
     const rowKeys = Object.keys(firstRow);
 
-    // Detect Date Column
-    let dateKey = rowKeys.find(k => k.toLowerCase() === 'data' || k.toLowerCase() === 'date' || k.toLowerCase() === 'dia');
+    // 3. Advanced Date Column Detection
     
-    // Fallback: check values
+    // Strategy A: Name match
+    let dateKey = rowKeys.find(k => {
+        const c = cleanKey(k);
+        return c === 'data' || c === 'date' || c === 'dia' || c === 'timestamp' || c === 'dt';
+    });
+    
+    // Strategy B: Content Scan (Check first 5 rows)
     if (!dateKey) {
+        const sampleRows = processedRows.slice(0, 5);
+        const columnScores: Record<string, number> = {};
+        
         for (const k of rowKeys) {
-            if (looksLikeDate(firstRow[k])) {
-                dateKey = k;
-                break;
+            let validDates = 0;
+            for (const row of sampleRows) {
+                if (looksLikeDate(row[k])) validDates++;
             }
+            if (validDates > 0) columnScores[k] = validDates;
+        }
+        
+        // Pick column with most valid dates
+        const bestCol = Object.keys(columnScores).sort((a, b) => columnScores[b] - columnScores[a])[0];
+        if (bestCol) dateKey = bestCol;
+    }
+
+    // Strategy C: Force Index 0 (The "Column A" fallback)
+    if (!dateKey && rowKeys.length > 0) {
+        // If the first column has *any* data, assume it's the date column as a last resort
+        // But verify it looks vaguely like a date or string
+        const firstColKey = rowKeys[0];
+        const val = firstRow[firstColKey];
+        if (looksLikeDate(val) || (typeof val === 'string' && val.length >= 8)) {
+            dateKey = firstColKey;
         }
     }
 
@@ -164,46 +209,49 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
             success: false, 
             data: null, 
             message: "Coluna de Data não encontrada.",
-            debug: `Chaves encontradas: ${rowKeys.join(', ')}. Nenhuma parece ser uma data.`
+            debug: `Chaves detectadas: [${rowKeys.join(', ')}].\nValor da primeira coluna (exemplo): ${rowKeys.length ? firstRow[rowKeys[0]] : 'N/A'}`
         };
     }
 
+    const normalizedData: Record<string, DayData> = {};
+
     processedRows.forEach((row: any) => {
-        // Parse Date
         const valDate = row[dateKey!];
         let dateStr = '';
         
+        // Date Parsing Logic
         if (typeof valDate === 'string') {
-             // Try to grab YYYY-MM-DD
-             const match = valDate.match(/\d{4}-\d{2}-\d{2}/);
+             const match = valDate.match(/\d{4}-\d{2}-\d{2}/); // YYYY-MM-DD
              if (match) dateStr = match[0];
              else {
-                 // Try DD/MM/YYYY
-                 const brMatch = valDate.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                 if (brMatch) dateStr = `${brMatch[3]}-${brMatch[2]}-${brMatch[1]}`;
+                 const brMatch = valDate.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); // DD/MM/YYYY
+                 if (brMatch) {
+                     const y = brMatch[3].length === 2 ? `20${brMatch[3]}` : brMatch[3];
+                     const m = brMatch[2].padStart(2, '0');
+                     const d = brMatch[1].padStart(2, '0');
+                     dateStr = `${y}-${m}-${d}`;
+                 }
              }
-        } else if (typeof valDate === 'number' && valDate > 40000) {
-            // Excel date
-            const d = new Date((valDate - 25569) * 86400 * 1000);
-            dateStr = d.toISOString().split('T')[0];
+             // Try generic Date parse if manual regex failed
+             if (!dateStr) {
+                 const d = new Date(valDate);
+                 if (!isNaN(d.getTime())) dateStr = d.toISOString().split('T')[0];
+             }
+        } else if (typeof valDate === 'number') {
+            // Excel date (approximate)
+            if (valDate > 30000) {
+                const d = new Date((valDate - 25569) * 86400 * 1000);
+                dateStr = d.toISOString().split('T')[0];
+            }
         }
 
-        // Fallback for date object
-        if (!dateStr && valDate) {
-            const d = new Date(valDate);
-            if (!isNaN(d.getTime())) dateStr = d.toISOString().split('T')[0];
-        }
+        if (!dateStr) return; // Skip invalid dates
 
-        if (!dateStr) return;
-
-        // Parse Tasks
         const tasksMap: Record<string, boolean> = {};
-        const rowKeys = Object.keys(row);
+        const currentRowKeys = Object.keys(row);
 
         INITIAL_TASKS.forEach(task => {
-            // Find key in row that fuzzy matches task.id
-            // task.id = "minoxidil_1" -> row key might be "minoxidil_1" or "Minoxidil 1" or "minoxidil1"
-            const matchingKey = rowKeys.find(k => fuzzyMatch(k, task.id));
+            const matchingKey = currentRowKeys.find(k => fuzzyMatch(k, task.id));
             if (matchingKey) {
                 tasksMap[task.id] = normalizeBoolean(row[matchingKey]);
             } else {
@@ -211,8 +259,11 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
             }
         });
 
-        // Parse Points
-        const pointKey = rowKeys.find(k => k.toLowerCase().includes('pontos') || k.toLowerCase().includes('total'));
+        // Find points column
+        const pointKey = currentRowKeys.find(k => {
+            const c = cleanKey(k);
+            return c.includes('ponto') || c.includes('total');
+        });
         const points = pointKey ? Number(row[pointKey]) : 0;
 
         normalizedData[dateStr] = {
@@ -225,7 +276,7 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResul
     return { 
         success: true, 
         data: normalizedData, 
-        message: `${Object.keys(normalizedData).length} dias processados.` 
+        message: `${Object.keys(normalizedData).length} dias processados com sucesso.` 
     };
 
   } catch (error: any) {

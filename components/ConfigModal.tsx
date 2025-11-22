@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Settings, CheckCircle, AlertTriangle, Activity, Terminal } from 'lucide-react';
+import { X, Settings, CheckCircle, AlertTriangle, Activity, Terminal, FileJson } from 'lucide-react';
 import { GOOGLE_SCRIPT_URL } from '../constants';
 import { diagnoseSheetConnection } from '../services/storageService';
 
@@ -11,6 +11,7 @@ interface ConfigModalProps {
 export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => {
   const [diagnosis, setDiagnosis] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
 
   if (!isOpen) return null;
 
@@ -24,7 +25,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="bg-slate-800 rounded-xl w-full max-w-2xl border border-slate-700 shadow-2xl flex flex-col my-8">
+      <div className="bg-slate-800 rounded-xl w-full max-w-3xl border border-slate-700 shadow-2xl flex flex-col my-8 max-h-[90vh]">
         <div className="flex justify-between items-center p-6 border-b border-slate-700 shrink-0">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Settings className="w-5 h-5 text-emerald-400" /> Configurações
@@ -34,7 +35,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
           </button>
         </div>
         
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 overflow-y-auto">
           {/* Google Sheets Configuration */}
           <div>
             <h3 className="text-lg font-semibold text-white mb-2">Integração Google Sheets</h3>
@@ -48,7 +49,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
                   type="text"
                   value={GOOGLE_SCRIPT_URL}
                   readOnly
-                  className="w-full bg-slate-900/50 border border-slate-600 rounded-lg p-3 text-slate-400 cursor-not-allowed text-sm font-mono"
+                  className="w-full bg-slate-900/50 border border-slate-600 rounded-lg p-3 text-slate-400 cursor-not-allowed text-sm font-mono truncate"
                 />
                 <div className="absolute right-3 top-3 text-emerald-500 text-xs font-bold">
                     CONECTADO
@@ -73,11 +74,21 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
 
                 {diagnosis && (
                     <div className="space-y-3 text-xs font-mono">
-                        <div className="flex items-center gap-2">
-                            <span className="text-slate-500">Status HTTP:</span>
-                            <span className={diagnosis.status === 200 ? "text-emerald-400" : "text-red-400"}>
-                                {diagnosis.status || 'N/A'}
-                            </span>
+                        <div className="grid grid-cols-2 gap-2">
+                             <div className="flex items-center gap-2">
+                                <span className="text-slate-500">Status:</span>
+                                <span className={diagnosis.status === 200 ? "text-emerald-400" : "text-red-400"}>
+                                    {diagnosis.status || 'N/A'}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="text-slate-500">Tipo Estrutura:</span>
+                                <span className="text-white">{diagnosis.structureType || 'N/A'}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="text-slate-500">Linhas:</span>
+                                <span className="text-white">{diagnosis.rowCount}</span>
+                            </div>
                         </div>
 
                         {diagnosis.error ? (
@@ -85,23 +96,18 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
                                 <AlertTriangle className="w-4 h-4 mb-1 inline mr-2" />
                                 {diagnosis.error}
                                 {diagnosis.rawPreview && (
-                                    <div className="mt-2 pt-2 border-t border-red-500/30 opacity-75">
-                                        Preview: {diagnosis.rawPreview}
+                                    <div className="mt-2 pt-2 border-t border-red-500/30 opacity-75 font-mono text-[10px]">
+                                        {diagnosis.rawPreview}
                                     </div>
                                 )}
                             </div>
                         ) : (
                             <>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-slate-500">Linhas Encontradas:</span>
-                                    <span className="text-white">{diagnosis.rowCount}</span>
-                                </div>
-                                
                                 <div className="mt-2">
-                                    <span className="text-slate-500 block mb-1">Colunas Detectadas (Primeira Linha):</span>
+                                    <span className="text-slate-500 block mb-1">Colunas Detectadas:</span>
                                     <div className="flex flex-wrap gap-1">
-                                        {diagnosis.headersDetected?.map((h: string) => (
-                                            <span key={h} className="bg-slate-800 px-1.5 py-0.5 rounded text-slate-300 border border-slate-700">
+                                        {diagnosis.headersDetected?.map((h: string, i: number) => (
+                                            <span key={i} className="bg-slate-800 px-1.5 py-0.5 rounded text-slate-300 border border-slate-700">
                                                 {h}
                                             </span>
                                         ))}
@@ -109,18 +115,30 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
                                 </div>
 
                                 <div className="mt-2">
-                                    <span className="text-slate-500 block mb-1 flex items-center gap-1">
-                                        <Terminal className="w-3 h-3" />
-                                        Amostra de Dados (Linha 1):
-                                    </span>
-                                    <pre className="bg-black/50 p-2 rounded border border-slate-800 overflow-x-auto text-emerald-300">
-                                        {JSON.stringify(diagnosis.firstRowSample, null, 2)}
-                                    </pre>
+                                    <div className="flex justify-between items-end mb-1">
+                                        <span className="text-slate-500 flex items-center gap-1">
+                                            <Terminal className="w-3 h-3" />
+                                            Amostra (Linha 1):
+                                        </span>
+                                        <button onClick={() => setShowRaw(!showRaw)} className="text-[10px] text-blue-400 hover:underline flex items-center gap-1">
+                                            <FileJson className="w-3 h-3" /> {showRaw ? 'Ocultar Raw' : 'Ver JSON Bruto'}
+                                        </button>
+                                    </div>
+                                    
+                                    {showRaw ? (
+                                         <pre className="bg-black/50 p-2 rounded border border-slate-800 overflow-x-auto text-[10px] text-slate-300 max-h-40 overflow-y-auto">
+                                            {diagnosis.rawJsonSnippet}
+                                         </pre>
+                                    ) : (
+                                        <pre className="bg-black/50 p-2 rounded border border-slate-800 overflow-x-auto text-emerald-300">
+                                            {JSON.stringify(diagnosis.firstRowSample, null, 2)}
+                                        </pre>
+                                    )}
                                 </div>
 
                                 <div className="mt-3 p-2 bg-blue-500/10 text-blue-200 rounded border border-blue-500/20">
                                     <CheckCircle className="w-3 h-3 inline mr-1" />
-                                    Se os dados acima aparecem corretamente, tente clicar em "Restaurar" na tela inicial.
+                                    Verifique se as colunas acima batem com sua planilha. O sistema tentará adivinhar a data automaticamente.
                                 </div>
                             </>
                         )}
@@ -129,7 +147,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose }) => 
 
                 {!diagnosis && !isLoading && (
                     <p className="text-slate-500 text-xs">
-                        Clique em testar para ver o que o sistema está recebendo da planilha.
+                        Clique em testar para ver exatamente o que o Google está enviando.
                     </p>
                 )}
             </div>
