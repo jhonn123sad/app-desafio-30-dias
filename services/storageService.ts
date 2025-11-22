@@ -1,110 +1,49 @@
-import { DayData } from '../types';
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../constants';
-import { createClient } from '@supabase/supabase-js';
 
-const DATA_KEY = 'routine_tracker_data';
+import { DayData, TaskDefinition, Period } from '../types';
+import { INITIAL_TASKS } from '../constants';
 
-// Initialize Supabase Client
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Keys
+const DATA_KEY_HISTORY = 'routine_tracker_history_v2';
+const DATA_KEY_DEFS = 'routine_tracker_definitions_v1';
 
-// --- Local Storage (Backup & Offline) ---
+// --- Task Definitions (Structure) ---
 
-export const getStoredData = (): Record<string, DayData> => {
-  const stored = localStorage.getItem(DATA_KEY);
+export const getStoredTaskDefinitions = (): TaskDefinition[] => {
+  const stored = localStorage.getItem(DATA_KEY_DEFS);
+  if (stored) {
+    return JSON.parse(stored);
+  }
+  
+  // First run: Seed with INITIAL_TASKS from constants
+  const initialDefs: TaskDefinition[] = INITIAL_TASKS.map(t => ({
+    id: t.id,
+    label: t.label,
+    period: t.period,
+    points: t.points
+  }));
+  
+  saveStoredTaskDefinitions(initialDefs);
+  return initialDefs;
+};
+
+export const saveStoredTaskDefinitions = (defs: TaskDefinition[]) => {
+  localStorage.setItem(DATA_KEY_DEFS, JSON.stringify(defs));
+};
+
+// --- Progress History ---
+
+export const getStoredHistory = (): Record<string, DayData> => {
+  const stored = localStorage.getItem(DATA_KEY_HISTORY);
   return stored ? JSON.parse(stored) : {};
 };
 
-export const saveStoredData = (data: Record<string, DayData>) => {
-  localStorage.setItem(DATA_KEY, JSON.stringify(data));
+export const saveDayProgress = (dayData: DayData) => {
+  const history = getStoredHistory();
+  history[dayData.date] = dayData;
+  localStorage.setItem(DATA_KEY_HISTORY, JSON.stringify(history));
 };
 
-export const clearLocalData = () => {
-  localStorage.removeItem(DATA_KEY);
-};
-
-// --- Supabase Integration ---
-
-interface CloudResult {
-    success: boolean;
-    data?: Record<string, DayData>;
-    message?: string;
-    error?: any;
-}
-
-/**
- * Salva (Upsert) um único dia no Supabase
- */
-export const syncWithCloud = async (data: DayData): Promise<boolean> => {
-  try {
-    const { error } = await supabase
-      .from('daily_logs')
-      .upsert({ 
-        date: data.date, 
-        total_points: data.totalPoints, 
-        tasks: data.tasks 
-      }, { onConflict: 'date' });
-
-    if (error) throw error;
-    return true;
-  } catch (error) {
-    console.error("Supabase Sync failed:", error);
-    return false;
-  }
-};
-
-/**
- * Carrega todo o histórico do Supabase
- */
-export const loadFromCloud = async (): Promise<CloudResult> => {
-  try {
-    const { data, error } = await supabase
-      .from('daily_logs')
-      .select('*');
-
-    if (error) throw error;
-
-    if (!data || data.length === 0) {
-        return { success: true, data: {}, message: "Nenhum dado encontrado no banco de dados." };
-    }
-
-    const normalizedData: Record<string, DayData> = {};
-    
-    data.forEach((row: any) => {
-        // Supabase returns straight data, no parsing needed
-        normalizedData[row.date] = {
-            date: row.date,
-            totalPoints: Number(row.total_points),
-            tasks: row.tasks // JSONB column comes as Object automatically
-        };
-    });
-
-    return { 
-        success: true, 
-        data: normalizedData, 
-        message: `${data.length} dias recuperados do Supabase.` 
-    };
-
-  } catch (error: any) {
-    return { success: false, message: "Erro ao conectar com Supabase", error: error.message };
-  }
-};
-
-/**
- * Apaga TODO o histórico do banco de dados (PERIGO)
- */
-export const clearAllCloudData = async (): Promise<boolean> => {
-  try {
-    // Supabase requer um filtro para deletar. Usamos um filtro que pega todas as datas válidas
-    // 'neq' significa "not equal". Deletar tudo que a data não for 'infinity'.
-    const { error } = await supabase
-      .from('daily_logs')
-      .delete()
-      .neq('date', 'infinity'); 
-
-    if (error) throw error;
-    return true;
-  } catch (error) {
-    console.error("Failed to clear database:", error);
-    return false;
-  }
+export const clearAllData = () => {
+  localStorage.removeItem(DATA_KEY_HISTORY);
+  localStorage.removeItem(DATA_KEY_DEFS);
 };

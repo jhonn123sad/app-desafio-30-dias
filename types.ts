@@ -21,3 +21,15 @@ export interface DayData {
 export interface AppConfig {
   supabaseUrl: string;
 }
+
+export interface User {
+  id: string;
+  email: string;
+}
+
+export interface TaskDefinition {
+  id: string;
+  label: string;
+  period: Period;
+  points: number;
+}

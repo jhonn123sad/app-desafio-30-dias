@@ -1,250 +1,231 @@
+
 import React, { useState, useEffect } from 'react';
-import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, CloudCheck, Cloud, AlertTriangle, X } from 'lucide-react';
-import { Task, Period, DayData } from './types';
-import { INITIAL_TASKS, TOTAL_POSSIBLE_POINTS } from './constants';
-import { getStoredData, saveStoredData, syncWithCloud, loadFromCloud, clearAllCloudData, clearLocalData } from './services/storageService';
+import { Sun, Sunset, Moon, CheckCircle, Circle, RotateCcw, Calendar, Edit3, LogOut, Loader2 } from 'lucide-react';
+import { Task, Period, DayData, TaskDefinition, User } from './types';
 import { ProgressChart } from './components/Chart';
+import { TaskEditor } from './components/TaskEditor';
 import { ConfigModal } from './components/ConfigModal';
+import { 
+  getStoredTaskDefinitions, 
+  saveStoredTaskDefinitions, 
+  getStoredHistory, 
+  saveDayProgress, 
+  clearAllData 
+} from './services/storageService';
 
 const App: React.FC = () => {
-  // State
-  const [tasks, setTasks] = useState<Task[]>(INITIAL_TASKS);
+  // Data State
+  const [taskDefinitions, setTaskDefinitions] = useState<TaskDefinition[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]); // Current day's tasks status
   const [history, setHistory] = useState<Record<string, DayData>>({});
   const [currentDate, setCurrentDate] = useState<string>('');
-  const [isConfigOpen, setIsConfigOpen] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
   
-  // Confirmation Modal State
+  // UI State
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isResetDayModalOpen, setIsResetDayModalOpen] = useState(false);
+  const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Initialize & Auto-Sync
+  // 1. Initial Load
   useEffect(() => {
-    const init = async () => {
+    const init = () => {
       const today = new Date().toISOString().split('T')[0];
       setCurrentDate(today);
-      
-      // 1. Load Local Data immediately for speed
-      const storedHistory = getStoredData();
-      setHistory(storedHistory);
-      
-      // Initial render with local data
-      loadTasksForDate(today, storedHistory);
 
-      // 2. Fetch from Cloud in background
-      try {
-        const result = await loadFromCloud();
-        
-        if (result.success && result.data) {
-          // Merge: Cloud data overwrites local if there's a conflict
-          const mergedHistory = { ...storedHistory, ...result.data };
-          setHistory(mergedHistory);
-          saveStoredData(mergedHistory);
-          
-          // Update view again with cloud data
-          loadTasksForDate(today, mergedHistory);
-        }
-      } catch (e) {
-        console.error("Auto-sync failed", e);
-      } finally {
-        setIsInitialLoading(false);
-      }
+      // Load Structure (Definitions)
+      const defs = getStoredTaskDefinitions();
+      setTaskDefinitions(defs);
+
+      // Load History
+      const hist = getStoredHistory();
+      setHistory(hist);
+
+      // Construct Today's View
+      constructDayView(today, defs, hist);
+      setIsLoading(false);
     };
-
     init();
   }, []);
 
-  const loadTasksForDate = (date: string, currentHistory: Record<string, DayData>) => {
-    if (currentHistory[date]) {
-      const dayData = currentHistory[date];
-      setTasks(prev => prev.map(t => ({
-        ...t,
-        completed: dayData.tasks[t.id] || false
-      })));
-    } else {
-      // Reset tasks if no data for this date
-      setTasks(INITIAL_TASKS.map(t => ({ ...t, completed: false })));
-    }
+  // 2. Construct Day View (Combine Definitions with Logged Progress)
+  const constructDayView = (date: string, definitions: TaskDefinition[], currentHistory: Record<string, DayData>) => {
+    const dayData = currentHistory[date];
+    
+    const constructedTasks: Task[] = definitions.map(def => ({
+        id: def.id,
+        label: def.label,
+        period: def.period,
+        points: def.points,
+        // Check if completed in history. If history doesn't exist for today, false.
+        completed: dayData ? !!dayData.tasks[def.id] : false
+    }));
+
+    setTasks(constructedTasks);
   };
 
-  // Calculate points
-  const completedCount = tasks.filter(t => t.completed).length;
-  const totalPoints = tasks.reduce((acc, t) => t.completed ? acc + t.points : acc, 0);
-  const progressPercentage = (totalPoints / TOTAL_POSSIBLE_POINTS) * 100;
-
   // Handlers
+
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newDate = e.target.value;
     setCurrentDate(newDate);
-    loadTasksForDate(newDate, history);
+    constructDayView(newDate, taskDefinitions, history);
   };
 
   const handleToggleTask = (taskId: string) => {
+    // Optimistic Update
     const newTasks = tasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t);
     setTasks(newTasks);
     
-    // Update History immediately for local storage
     const newTotalPoints = newTasks.reduce((acc, t) => t.completed ? acc + t.points : acc, 0);
     const taskMap = newTasks.reduce((acc, t) => ({ ...acc, [t.id]: t.completed }), {});
     
-    const newHistory = {
-      ...history,
-      [currentDate]: {
+    const dayData: DayData = {
         date: currentDate,
         totalPoints: newTotalPoints,
         tasks: taskMap
-      }
     };
-    
+
+    // Update History State & Storage
+    const newHistory = { ...history, [currentDate]: dayData };
     setHistory(newHistory);
-    saveStoredData(newHistory);
+    saveDayProgress(dayData);
   };
 
-  // Trigger Reset Confirmation
-  const onResetDayClick = () => {
-    setIsResetDayModalOpen(true);
-  };
-
-  // Actual Reset Logic (Called by Modal)
-  const confirmResetCurrentDay = async () => {
-    setIsResetDayModalOpen(false);
-    setIsSyncing(true); 
+  const handleSaveDefinitions = async (newDefinitions: TaskDefinition[]) => {
+    // 1. Save structure to Local Storage
+    saveStoredTaskDefinitions(newDefinitions);
     
-    // 1. Reset State
+    // 2. Update local state
+    setTaskDefinitions(newDefinitions);
+    
+    // 3. Re-render current day with new structure (keeping existing checkmarks if IDs match)
+    constructDayView(currentDate, newDefinitions, history);
+  };
+
+  const confirmResetCurrentDay = () => {
+    setIsResetDayModalOpen(false);
+    
     const resetTasks = tasks.map(t => ({ ...t, completed: false }));
     setTasks(resetTasks);
     
-    // 2. Prepare Empty Data
-    const emptyDayData: DayData = {
+    const dayData: DayData = {
         date: currentDate,
         totalPoints: 0,
-        tasks: resetTasks.reduce((acc, t) => ({ ...acc, [t.id]: false }), {})
+        tasks: {}
     };
 
-    // 3. Update Local
-    const newHistory = {
-      ...history,
-      [currentDate]: emptyDayData
-    };
+    const newHistory = { ...history, [currentDate]: dayData };
     setHistory(newHistory);
-    saveStoredData(newHistory);
-
-    // 4. Force Sync to Cloud
-    await syncWithCloud(emptyDayData);
-    
-    setIsSyncing(false);
+    saveDayProgress(dayData);
   };
 
-  // Reseta TUDO (Passado para o Modal)
   const handleFullReset = async () => {
-    const success = await clearAllCloudData();
-    if (success) {
-      clearLocalData();
-      setHistory({});
-      setTasks(INITIAL_TASKS.map(t => ({ ...t, completed: false })));
-      // Removed alert for better UI flow, handled inside modal mostly or implicitly
-    } else {
-      console.error("Erro ao apagar histórico");
-    }
+    clearAllData();
+    window.location.reload();
   };
 
-  const handleSync = async () => {
-    setIsSyncing(true);
-    const todayData: DayData = {
-      date: currentDate,
-      totalPoints,
-      tasks: tasks.reduce((acc, t) => ({ ...acc, [t.id]: t.completed }), {})
-    };
-    
-    const success = await syncWithCloud(todayData);
-    
-    setIsSyncing(false);
-  };
-
-  // Helper to filter tasks
+  // Derived State
+  const maxPoints = tasks.reduce((acc, t) => acc + t.points, 0);
+  const totalPoints = tasks.reduce((acc, t) => t.completed ? acc + t.points : acc, 0);
+  const progressPercentage = maxPoints > 0 ? (totalPoints / maxPoints) * 100 : 0;
   const getTasksByPeriod = (period: Period) => tasks.filter(t => t.period === period);
+
+  if (isLoading) {
+    return (
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+            <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
+        </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 p-4 pb-20 md:p-8">
       <div className="max-w-3xl mx-auto space-y-8">
         
         {/* Header */}
-        <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div>
+        <header className="flex flex-col gap-6">
+          <div className="flex justify-between items-center border-b border-slate-800 pb-4">
             <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-bold tracking-tight text-white">Desafio 30 Dias</h1>
-              {/* Cloud Status Indicator */}
-              <div className="mt-1" title={isInitialLoading ? "Baixando dados..." : "Sincronizado"}>
-                 {isInitialLoading ? (
-                    <Loader2 className="w-4 h-4 text-slate-500 animate-spin" />
-                 ) : (
-                    <CloudCheck className="w-5 h-5 text-emerald-500/50" />
-                 )}
-              </div>
+                <div className="bg-emerald-500/10 p-2 rounded-full border border-emerald-500/20">
+                    <span className="font-bold text-emerald-500 text-xl">RT</span>
+                </div>
+                <div>
+                    <h1 className="text-xl font-bold tracking-tight text-white">Routine Tracker</h1>
+                    <p className="text-xs text-slate-500 font-mono flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                        Modo Local • Offline
+                    </p>
+                </div>
             </div>
-            
-            <div className="flex items-center gap-2 mt-2 bg-slate-800 p-1.5 rounded-lg border border-slate-700 w-fit">
-              <Calendar className="w-4 h-4 text-slate-400 ml-1" />
-              <input 
-                type="date" 
-                value={currentDate}
-                onChange={handleDateChange}
-                className="bg-transparent border-none text-sm text-white focus:ring-0 outline-none font-mono"
-              />
-            </div>
+            <button 
+                onClick={() => setIsConfigModalOpen(true)}
+                className="text-slate-500 hover:text-white p-2 hover:bg-slate-800 rounded-lg transition-colors"
+                title="Configurações"
+            >
+                <LogOut className="w-5 h-5 rotate-180" />
+            </button>
           </div>
-          <div className="flex gap-2 w-full md:w-auto">
-            
-            <button 
-                onClick={handleSync}
-                disabled={isSyncing}
-                className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Salvar no Supabase"
-            >
-                {isSyncing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
-                {isSyncing ? 'Salvando...' : 'Salvar'}
-            </button>
-            <button 
-              onClick={onResetDayClick}
-              className="p-2.5 bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400 rounded-lg border border-slate-700 transition-colors"
-              title="Resetar apenas o dia atual"
-            >
-              <RotateCcw className="w-5 h-5" />
-            </button>
-            <button 
-              onClick={() => setIsConfigOpen(true)}
-              className="p-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-            >
-              <Zap className="w-5 h-5 text-yellow-400" />
-            </button>
+
+          <div className="flex justify-between items-end flex-wrap gap-4">
+            <div>
+                <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs font-bold text-slate-500 uppercase">Data de hoje</span>
+                </div>
+                <div className="flex items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700 w-fit shadow-sm">
+                    <Calendar className="w-4 h-4 text-emerald-500 ml-1" />
+                    <input 
+                        type="date" 
+                        value={currentDate}
+                        onChange={handleDateChange}
+                        className="bg-transparent border-none text-sm text-white focus:ring-0 outline-none font-mono"
+                    />
+                </div>
+            </div>
+
+            <div className="flex gap-2">
+                <button 
+                  onClick={() => setIsResetDayModalOpen(true)}
+                  className="p-2.5 bg-slate-800 hover:bg-red-500/10 hover:text-red-400 text-slate-400 rounded-lg border border-slate-700 transition-colors"
+                  title="Resetar dia"
+                >
+                  <RotateCcw className="w-5 h-5" />
+                </button>
+                <button 
+                  onClick={() => setIsEditorOpen(true)}
+                  className="px-4 py-2.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-600/20 rounded-lg transition-colors flex items-center gap-2 font-semibold text-sm"
+                  title="Editar Rotina"
+                >
+                  <Edit3 className="w-4 h-4" /> Editar Tarefas
+                </button>
+            </div>
           </div>
         </header>
 
         {/* Main Score Card */}
-        <div className="bg-gradient-to-r from-slate-800 to-slate-800 border border-slate-700 rounded-2xl p-6 relative overflow-hidden shadow-xl">
-          <div className="absolute top-0 left-0 w-full h-1 bg-slate-700">
+        <div className="bg-gradient-to-br from-slate-800 via-slate-800 to-slate-900 border border-slate-700 rounded-2xl p-6 relative overflow-hidden shadow-2xl">
+        <div className="absolute top-0 left-0 w-full h-1 bg-slate-700">
             <div 
-              className="h-full bg-emerald-500 transition-all duration-500 ease-out"
-              style={{ width: `${progressPercentage}%` }}
+            className="h-full bg-emerald-500 transition-all duration-500 ease-out"
+            style={{ width: `${progressPercentage}%` }}
             />
-          </div>
-          <div className="flex items-end justify-between mt-2">
+        </div>
+        <div className="flex items-end justify-between mt-2 relative z-10">
             <div>
-              <span className="block text-slate-400 text-sm font-medium uppercase tracking-wider mb-1">Pontuação ({currentDate.split('-').reverse().join('/')})</span>
-              <div className="text-5xl font-bold text-white tracking-tighter">
-                {totalPoints} <span className="text-2xl text-slate-500 font-normal">/ {TOTAL_POSSIBLE_POINTS}</span>
-              </div>
+            <span className="block text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Pontuação Diária</span>
+            <div className="text-5xl font-bold text-white tracking-tighter flex items-baseline gap-2">
+                {totalPoints} <span className="text-2xl text-slate-600 font-normal">/ {maxPoints}</span>
+            </div>
             </div>
             <div className="text-right">
-              <div className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide ${
-                progressPercentage >= 80 ? 'bg-emerald-500/20 text-emerald-400' : 
-                progressPercentage >= 50 ? 'bg-yellow-500/20 text-yellow-400' : 
-                'bg-red-500/20 text-red-400'
-              }`}>
-                {progressPercentage >= 80 ? 'Excelente' : progressPercentage >= 50 ? 'Moderado' : 'Baixo'}
-              </div>
+            <div className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide border ${
+                progressPercentage >= 80 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 
+                progressPercentage >= 50 ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' : 
+                'bg-red-500/10 text-red-400 border-red-500/20'
+            }`}>
+                {progressPercentage >= 80 ? 'Excelente' : progressPercentage >= 50 ? 'Regular' : 'Baixo'}
             </div>
-          </div>
+            </div>
+        </div>
         </div>
 
         {/* Chart */}
@@ -252,61 +233,49 @@ const App: React.FC = () => {
 
         {/* Task Sections */}
         <div className="grid gap-6">
-          {/* Morning */}
-          <section className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-            <div className="px-6 py-4 bg-slate-800/80 border-b border-slate-700 flex items-center gap-3">
-              <div className="p-2 bg-blue-500/10 rounded-lg">
-                <Sun className="w-5 h-5 text-blue-400" />
-              </div>
-              <h2 className="font-semibold text-lg text-blue-100">Manhã</h2>
-            </div>
-            <div className="p-4 grid gap-3 sm:grid-cols-2">
-              {getTasksByPeriod(Period.MORNING).map(task => (
-                <TaskItem key={task.id} task={task} onToggle={handleToggleTask} />
-              ))}
-            </div>
-          </section>
+            <TaskSection 
+                title="Manhã" 
+                icon={<Sun className="w-5 h-5 text-blue-400" />} 
+                colorClass="blue"
+                tasks={getTasksByPeriod(Period.MORNING)}
+                onToggle={handleToggleTask}
+            />
 
-          {/* Afternoon */}
-          <section className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-            <div className="px-6 py-4 bg-slate-800/80 border-b border-slate-700 flex items-center gap-3">
-              <div className="p-2 bg-orange-500/10 rounded-lg">
-                <Sunset className="w-5 h-5 text-orange-400" />
-              </div>
-              <h2 className="font-semibold text-lg text-orange-100">Tarde</h2>
-            </div>
-            <div className="p-4 grid gap-3 sm:grid-cols-2">
-              {getTasksByPeriod(Period.AFTERNOON).map(task => (
-                <TaskItem key={task.id} task={task} onToggle={handleToggleTask} />
-              ))}
-            </div>
-          </section>
+            <TaskSection 
+                title="Tarde" 
+                icon={<Sunset className="w-5 h-5 text-orange-400" />} 
+                colorClass="orange"
+                tasks={getTasksByPeriod(Period.AFTERNOON)}
+                onToggle={handleToggleTask}
+            />
 
-          {/* Night */}
-          <section className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-            <div className="px-6 py-4 bg-slate-800/80 border-b border-slate-700 flex items-center gap-3">
-              <div className="p-2 bg-indigo-500/10 rounded-lg">
-                <Moon className="w-5 h-5 text-indigo-400" />
-              </div>
-              <h2 className="font-semibold text-lg text-indigo-100">Noite (18h+)</h2>
-            </div>
-            <div className="p-4 grid gap-3 sm:grid-cols-2">
-              {getTasksByPeriod(Period.NIGHT).map(task => (
-                <TaskItem key={task.id} task={task} onToggle={handleToggleTask} />
-              ))}
-            </div>
-          </section>
+            <TaskSection 
+                title="Noite" 
+                icon={<Moon className="w-5 h-5 text-indigo-400" />} 
+                colorClass="indigo"
+                tasks={getTasksByPeriod(Period.NIGHT)}
+                onToggle={handleToggleTask}
+            />
+            
+            {tasks.length === 0 && (
+                <div className="text-center py-12 border-2 border-dashed border-slate-800 rounded-xl">
+                    <p className="text-slate-500">Sua lista de tarefas está vazia.</p>
+                    <button onClick={() => setIsEditorOpen(true)} className="text-emerald-500 font-semibold mt-2 hover:underline">
+                        Criar tarefas agora
+                    </button>
+                </div>
+            )}
         </div>
+
       </div>
 
-      {/* Day Reset Confirmation Modal */}
+      {/* Modals */}
       {isResetDayModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-slate-800 rounded-xl w-full max-w-md border border-slate-700 shadow-2xl p-6">
             <h3 className="text-lg font-bold text-white mb-2">Resetar dia?</h3>
             <p className="text-slate-400 text-sm mb-6">
-              Você tem certeza que deseja limpar todas as tarefas de <strong>hoje</strong> ({currentDate})? 
-              <br/>Isso não afetará os outros dias.
+              Isso desmarcará todas as tarefas de <strong>hoje</strong>.
             </p>
             <div className="flex gap-3 justify-end">
               <button 
@@ -319,23 +288,56 @@ const App: React.FC = () => {
                 onClick={confirmResetCurrentDay}
                 className="px-4 py-2 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 font-semibold transition-colors"
               >
-                Sim, limpar dia
+                Confirmar
               </button>
             </div>
           </div>
         </div>
       )}
 
-      <ConfigModal 
-        isOpen={isConfigOpen} 
-        onClose={() => setIsConfigOpen(false)}
+      <TaskEditor 
+        isOpen={isEditorOpen} 
+        onClose={() => setIsEditorOpen(false)}
+        currentTasks={taskDefinitions}
+        onSave={handleSaveDefinitions}
+      />
+
+      <ConfigModal
+        isOpen={isConfigModalOpen}
+        onClose={() => setIsConfigModalOpen(false)}
         onResetAll={handleFullReset}
       />
     </div>
   );
 };
 
-// Sub-component for list items to keep App clean
+// Helper Components
+const TaskSection: React.FC<{ title: string, icon: React.ReactNode, colorClass: string, tasks: Task[], onToggle: (id: string) => void }> = ({ title, icon, tasks, onToggle, colorClass }) => {
+    if (tasks.length === 0) return null;
+
+    const colors: any = {
+        blue: "text-blue-100",
+        orange: "text-orange-100",
+        indigo: "text-indigo-100"
+    };
+
+    return (
+        <section className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
+            <div className="px-6 py-4 bg-slate-800/80 border-b border-slate-700 flex items-center gap-3">
+              <div className={`p-2 bg-${colorClass}-500/10 rounded-lg`}>
+                {icon}
+              </div>
+              <h2 className={`font-semibold text-lg ${colors[colorClass]}`}>{title}</h2>
+            </div>
+            <div className="p-4 grid gap-3 sm:grid-cols-2">
+              {tasks.map(task => (
+                <TaskItem key={task.id} task={task} onToggle={onToggle} />
+              ))}
+            </div>
+        </section>
+    );
+};
+
 const TaskItem: React.FC<{ task: Task; onToggle: (id: string) => void }> = ({ task, onToggle }) => {
   return (
     <div 
@@ -351,11 +353,15 @@ const TaskItem: React.FC<{ task: Task; onToggle: (id: string) => void }> = ({ ta
         <div className={`transition-colors ${task.completed ? 'text-emerald-400' : 'text-slate-500 group-hover:text-slate-400'}`}>
           {task.completed ? <CheckCircle className="w-6 h-6" /> : <Circle className="w-6 h-6" />}
         </div>
-        <span className={`font-medium ${task.completed ? 'text-emerald-100 line-through decoration-emerald-500/50' : 'text-slate-300'}`}>
-          {task.label}
-        </span>
+        <div className="flex flex-col">
+            <span className={`font-medium transition-all ${task.completed ? 'text-emerald-100 line-through decoration-emerald-500/50' : 'text-slate-300'}`}>
+            {task.label}
+            </span>
+        </div>
       </div>
-      {task.completed && <span className="text-xs font-bold text-emerald-400">+{task.points}</span>}
+      <span className={`text-xs font-bold font-mono px-2 py-1 rounded ${task.completed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700 text-slate-500'}`}>
+        {task.points} pts
+      </span>
     </div>
   );
 };

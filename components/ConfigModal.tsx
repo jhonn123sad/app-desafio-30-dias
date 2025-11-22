@@ -1,6 +1,6 @@
+
 import React, { useState } from 'react';
-import { X, Settings, Database, ShieldCheck, Trash2, AlertTriangle, Loader2, AlertCircle } from 'lucide-react';
-import { SUPABASE_URL } from '../constants';
+import { X, Settings, Trash2, AlertTriangle, Loader2, AlertCircle } from 'lucide-react';
 
 interface ConfigModalProps {
   isOpen: boolean;
@@ -23,9 +23,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onRes
     // Execute reset
     setIsReseting(true);
     await onResetAll();
-    setIsReseting(false);
-    setResetStep(0);
-    onClose();
+    // No need to set false, app will likely reload
   };
 
   return (
@@ -41,32 +39,6 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onRes
         </div>
         
         <div className="p-6 space-y-6">
-          {/* Backend Info */}
-          <div className="bg-slate-900 rounded-lg border border-slate-700 p-4">
-              <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                  <Database className="w-5 h-5 text-blue-400" /> Backend Supabase
-              </h3>
-              
-              <div className="space-y-4">
-                  <div className="flex items-center gap-3 bg-emerald-500/10 p-3 rounded-lg border border-emerald-500/20">
-                      <ShieldCheck className="w-6 h-6 text-emerald-400" />
-                      <div>
-                          <p className="text-emerald-400 font-bold text-sm">Conexão Ativa</p>
-                          <p className="text-slate-400 text-xs">Utilizando banco de dados PostgreSQL</p>
-                      </div>
-                  </div>
-
-                  <div>
-                      <label className="block text-xs font-medium text-slate-500 uppercase mb-1">Project URL</label>
-                      <input 
-                          readOnly 
-                          value={SUPABASE_URL} 
-                          className="w-full bg-black/30 border border-slate-700 rounded px-3 py-2 text-slate-300 text-xs font-mono"
-                      />
-                  </div>
-              </div>
-          </div>
-
           {/* Danger Zone */}
           <div className="bg-red-900/10 rounded-lg border border-red-900/30 p-4">
               <h3 className="text-lg font-semibold text-red-400 mb-4 flex items-center gap-2">
@@ -74,13 +46,13 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onRes
               </h3>
               
               <p className="text-slate-400 text-sm mb-4">
-                Ações irreversíveis que afetam todo o seu histórico de dados.
+                Esta ação apagará todo o histórico de progresso e <strong>também reverterá sua lista de tarefas</strong> para o padrão original.
               </p>
 
               {resetStep === 1 && (
                 <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded text-red-200 text-sm flex items-start gap-2">
                   <AlertCircle className="w-5 h-5 shrink-0" />
-                  <p>Tem certeza absoluta? Isso apagará permanentemente todo o seu progresso de todos os dias. Esta ação não pode ser desfeita.</p>
+                  <p>Tem certeza absoluta? Isso apaga tudo permanentemente.</p>
                 </div>
               )}
 
@@ -94,7 +66,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({ isOpen, onClose, onRes
                 }`}
               >
                 {isReseting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Trash2 className="w-5 h-5" />}
-                {isReseting ? 'Apagando...' : resetStep === 1 ? 'CONFIRMAR EXCLUSÃO TOTAL' : 'Apagar Todo o Histórico'}
+                {isReseting ? 'Reiniciando App...' : resetStep === 1 ? 'CONFIRMAR RESET TOTAL' : 'Apagar Tudo e Resetar'}
               </button>
               
               {resetStep === 1 && (
