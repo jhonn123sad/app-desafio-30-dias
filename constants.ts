@@ -19,7 +19,7 @@ export const INITIAL_TASKS: Task[] = [
   { id: 'ultima_refeicao', label: 'Última Refeição', period: Period.AFTERNOON, completed: false, points: 1 },
 
   // Noite (18h)
-  { id: 'cicino', label: 'Cícino', period: Period.NIGHT, completed: false, points: 1 },
+  { id: 'cicino', label: 'Rícino', period: Period.NIGHT, completed: false, points: 1 },
   { id: 'academia', label: 'Academia', period: Period.NIGHT, completed: false, points: 1 },
   { id: 'escrever_finalizar', label: 'Escrever / Finalizar dia', period: Period.NIGHT, completed: false, points: 1 },
 ];
