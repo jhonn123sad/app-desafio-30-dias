@@ -1,6 +1,6 @@
 import { Period, Task } from './types';
 
-export const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzV_m_V4PqG61CoyihemSpIkDJn5tbY4hjeSSs4sSNG_7OFU6AMyeqYBggWYGwl3-i_MA/exec';
+export const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbytBmFgpnlke6BO12rKHjKh0o3U9688ibkv7esgeHBJMuL0r9MS0O7GRQ7sdBVqYbS7qQ/exec';
 
 export const INITIAL_TASKS: Task[] = [
   // Manhã

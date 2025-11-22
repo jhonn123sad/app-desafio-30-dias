@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar } from 'lucide-react';
+import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, DownloadCloud } from 'lucide-react';
 import { Task, Period, DayData } from './types';
 import { INITIAL_TASKS, TOTAL_POSSIBLE_POINTS, GOOGLE_SCRIPT_URL } from './constants';
-import { getStoredData, saveStoredData, syncWithGoogleSheets } from './services/storageService';
+import { getStoredData, saveStoredData, syncWithGoogleSheets, loadFromGoogleSheets } from './services/storageService';
 import { ProgressChart } from './components/Chart';
 import { ConfigModal } from './components/ConfigModal';
 
@@ -13,6 +13,7 @@ const App: React.FC = () => {
   const [currentDate, setCurrentDate] = useState<string>('');
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isLoadingCloud, setIsLoadingCloud] = useState(false);
 
   // Initialize
   useEffect(() => {
@@ -108,30 +109,44 @@ const App: React.FC = () => {
     setIsSyncing(false);
 
     if (success) {
-        // Auto-reset logic after successful save as requested
-        const resetTasks = tasks.map(t => ({ ...t, completed: false }));
-        setTasks(resetTasks);
-        
-        // We also update local history to reflect the reset (clean slate for next entry), 
-        // OR do we keep the history but just clear the UI? 
-        // "Reset automaticamente depois de salvar" typically implies ready for next input.
-        // However, if we clear history, the chart goes to 0. 
-        // I will clear the UI inputs but KEEP the history so the chart remains correct until they start typing again.
-        // Actually, to make the UX make sense: If I save, I want the record to stay there.
-        // BUT the user explicitly asked "resete automaticamente". 
-        // I will interpret this as: Save -> Clear Inputs (so user can enter another day or start fresh).
-        // This effectively deletes the local "checked" state for the current view, prompting them to enter data again.
-        // But to prevent the chart from flashing 0, I won't delete the `history` entry yet, just the UI state.
-        // Actually, if I clear UI state, `handleToggleTask` isn't called, so history stays.
-        // But `tasks` state drives the UI.
-        
-        alert(`Dados do dia ${currentDate.split('-').reverse().join('/')} salvos com sucesso! O formulário foi resetado.`);
-        setTasks(INITIAL_TASKS.map(t => ({ ...t, completed: false })));
-        
-        // NOTE: We do NOT clear the history entry here, otherwise the chart would lose the data we just saved.
-        // The user can now select a new date or start filling again.
+        alert(`Dados do dia ${currentDate.split('-').reverse().join('/')} salvos na nuvem!`);
     } else {
-        alert("Erro na sincronização com a planilha.");
+        alert("Erro na sincronização com a planilha. Verifique sua conexão.");
+    }
+  };
+
+  const handleDownloadCloud = async () => {
+    if (!GOOGLE_SCRIPT_URL) {
+        setIsConfigOpen(true);
+        return;
+    }
+
+    if (!confirm("Isso irá buscar o histórico da planilha. Dados locais de dias conflitantes serão atualizados pelo que está na planilha. Continuar?")) {
+        return;
+    }
+
+    setIsLoadingCloud(true);
+    const cloudData = await loadFromGoogleSheets(GOOGLE_SCRIPT_URL);
+    setIsLoadingCloud(false);
+
+    if (cloudData && Object.keys(cloudData).length > 0) {
+        // Merge cloud data with local history (Cloud wins conflicts)
+        const mergedHistory = { ...history, ...cloudData };
+        setHistory(mergedHistory);
+        saveStoredData(mergedHistory);
+        
+        // Refresh current view if the current date was affected
+        loadTasksForDate(currentDate, mergedHistory);
+        
+        const daysCount = Object.keys(cloudData).length;
+        alert(`Sucesso! ${daysCount} dias foram recuperados da planilha.`);
+    } else {
+        // Se retornou null ou vazio
+        if (cloudData === null) {
+             alert("Erro crítico de conexão. Verifique se o Web App do Google Script está implantado como 'Executável por qualquer pessoa' (Anyone).");
+        } else {
+             alert("Conexão feita, mas nenhum registro válido foi encontrado. Verifique se sua planilha tem a coluna 'Data' preenchida no formato AAAA-MM-DD e se há dados nas linhas.");
+        }
     }
   };
 
@@ -158,13 +173,23 @@ const App: React.FC = () => {
           </div>
           <div className="flex gap-2 w-full md:w-auto">
             <button 
+                onClick={handleDownloadCloud}
+                disabled={isLoadingCloud}
+                className="flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium transition-all border border-slate-600 disabled:opacity-50"
+                title="Baixar histórico da Nuvem"
+            >
+                 {isLoadingCloud ? <Loader2 className="w-5 h-5 animate-spin" /> : <DownloadCloud className="w-5 h-5" />}
+                 <span className="hidden md:inline">Restaurar</span>
+            </button>
+
+            <button 
                 onClick={handleSync}
                 disabled={isSyncing}
                 className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Salvar na Nuvem"
             >
                 {isSyncing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
-                {isSyncing ? 'Salvando...' : 'Salvar na Nuvem'}
+                {isSyncing ? 'Salvando...' : 'Salvar'}
             </button>
             <button 
               onClick={handleResetDay}
