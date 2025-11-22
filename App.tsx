@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, DownloadCloud } from 'lucide-react';
 import { Task, Period, DayData } from './types';
-import { INITIAL_TASKS, TOTAL_POSSIBLE_POINTS, GOOGLE_SCRIPT_URL } from './constants';
-import { getStoredData, saveStoredData, syncWithGoogleSheets, loadFromGoogleSheets } from './services/storageService';
+import { INITIAL_TASKS, TOTAL_POSSIBLE_POINTS } from './constants';
+import { getStoredData, saveStoredData, syncWithCloud, loadFromCloud } from './services/storageService';
 import { ProgressChart } from './components/Chart';
 import { ConfigModal } from './components/ConfigModal';
 
@@ -92,11 +92,6 @@ const App: React.FC = () => {
   };
 
   const handleSync = async () => {
-    if (!GOOGLE_SCRIPT_URL) {
-      setIsConfigOpen(true);
-      return;
-    }
-    
     setIsSyncing(true);
     const todayData: DayData = {
       date: currentDate,
@@ -104,32 +99,28 @@ const App: React.FC = () => {
       tasks: tasks.reduce((acc, t) => ({ ...acc, [t.id]: t.completed }), {})
     };
     
-    const success = await syncWithGoogleSheets(todayData, GOOGLE_SCRIPT_URL);
+    const success = await syncWithCloud(todayData);
     
     setIsSyncing(false);
 
     if (success) {
-        alert(`Dados do dia ${currentDate.split('-').reverse().join('/')} salvos na nuvem!`);
+        // Optional: Trigger a tiny success visual if needed, but alert works for now
+        alert(`Dados do dia ${currentDate.split('-').reverse().join('/')} salvos no Supabase!`);
     } else {
-        alert("Erro na sincronização com a planilha. Verifique sua conexão.");
+        alert("Erro na sincronização. Verifique o console.");
     }
   };
 
   const handleDownloadCloud = async () => {
-    if (!GOOGLE_SCRIPT_URL) {
-        setIsConfigOpen(true);
-        return;
-    }
-
-    if (!confirm("Isso irá buscar o histórico da planilha. Dados locais de dias conflitantes serão substituídos. Continuar?")) {
+    if (!confirm("Isso irá buscar o histórico do banco de dados (Supabase). Dados locais de dias conflitantes serão atualizados. Continuar?")) {
         return;
     }
 
     setIsLoadingCloud(true);
-    const result = await loadFromGoogleSheets(GOOGLE_SCRIPT_URL);
+    const result = await loadFromCloud();
     setIsLoadingCloud(false);
 
-    if (result.success && result.data && Object.keys(result.data).length > 0) {
+    if (result.success && result.data) {
         // Merge cloud data with local history (Cloud wins conflicts)
         const mergedHistory = { ...history, ...result.data };
         setHistory(mergedHistory);
@@ -139,17 +130,9 @@ const App: React.FC = () => {
         loadTasksForDate(currentDate, mergedHistory);
         
         const daysCount = Object.keys(result.data).length;
-        alert(`Sucesso! ${daysCount} dias recuperados da planilha.`);
+        alert(result.message);
     } else {
-        // Tratamento de erro detalhado
-        let errorMsg = "Falha ao ler dados.";
-        if (result.message) errorMsg = result.message;
-        
-        if (result.debug) {
-             errorMsg += `\n\nDetalhes técnicos:\n${result.debug}`;
-        }
-        
-        alert(errorMsg);
+        alert(`Erro: ${result.message}\n${result.error || ''}`);
     }
   };
 
@@ -179,7 +162,7 @@ const App: React.FC = () => {
                 onClick={handleDownloadCloud}
                 disabled={isLoadingCloud}
                 className="flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium transition-all border border-slate-600 disabled:opacity-50"
-                title="Baixar histórico da Nuvem"
+                title="Baixar histórico do Supabase"
             >
                  {isLoadingCloud ? <Loader2 className="w-5 h-5 animate-spin" /> : <DownloadCloud className="w-5 h-5" />}
                  <span className="hidden md:inline">Restaurar</span>
@@ -189,7 +172,7 @@ const App: React.FC = () => {
                 onClick={handleSync}
                 disabled={isSyncing}
                 className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Salvar na Nuvem"
+                title="Salvar no Supabase"
             >
                 {isSyncing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                 {isSyncing ? 'Salvando...' : 'Salvar'}

@@ -19,6 +19,5 @@ export interface DayData {
 }
 
 export interface AppConfig {
-  // geminiApiKey removido pois a IA foi desativada
-  googleSheetScriptUrl: string; // Google Apps Script Web App URL
+  supabaseUrl: string;
 }
