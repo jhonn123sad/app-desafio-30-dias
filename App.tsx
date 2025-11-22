@@ -139,13 +139,13 @@ const App: React.FC = () => {
         loadTasksForDate(currentDate, mergedHistory);
         
         const daysCount = Object.keys(cloudData).length;
-        alert(`Sucesso! ${daysCount} dias foram recuperados da planilha.`);
+        alert(`Sucesso! ${daysCount} dias recuperados da planilha.`);
     } else {
         // Se retornou null ou vazio
         if (cloudData === null) {
-             alert("Erro de conexão com o Google Sheets. Verifique se o link do script está correto.");
+             alert("Erro de conexão com o Google Sheets. Verifique se o link do script está correto e acessível.");
         } else {
-             alert("Conexão bem sucedida, mas o sistema não conseguiu ler as colunas da planilha.\n\nCertifique-se que a primeira coluna se chama 'Data' e que as outras colunas têm os nomes exatos das tarefas (ex: 'vacum', 'leitura', etc) ou verifique se há dados preenchidos.");
+             alert("Conexão realizada, mas nenhum registro válido foi encontrado.\n\nVerificamos sua planilha mas não conseguimos identificar a coluna 'Data' ou as linhas de dados.\n\nDica: Verifique se a coluna A se chama 'Data' e se as datas estão no formato AAAA-MM-DD.");
         }
     }
   };

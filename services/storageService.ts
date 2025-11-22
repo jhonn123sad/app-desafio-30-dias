@@ -46,14 +46,18 @@ const normalizeBoolean = (value: any): boolean => {
     if (typeof value === 'number') return value === 1;
     if (typeof value === 'string') {
         const lower = value.toLowerCase().trim();
-        // Adicionado suporte explícito para Sim/Não
+        // Adicionado suporte explícito para Sim/Não e variações
         return ['sim', 's', 'true', 'yes', 'y', 'verdadeiro', '1'].includes(lower);
     }
     return false;
 };
 
 const normalizeKey = (key: string): string => {
-    return key.toLowerCase().replace(/_/g, '').replace(/\s+/g, '').trim();
+    if (!key) return '';
+    // Remove accents, special chars, spaces, underscores, lower case
+    return key.toString().toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
+        .replace(/[^a-z0-9]/g, ""); // keep only alphanumeric
 };
 
 export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<string, DayData> | null> => {
@@ -68,52 +72,60 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<st
     }
 
     let rawData = await response.json();
-    console.log("Dados brutos recebidos (amostra):", Array.isArray(rawData) ? rawData.slice(0, 2) : rawData);
     
     if (rawData && rawData.error) {
         console.error("Google Script Error:", rawData.error);
         return null;
     }
 
-    let rows: any[] = [];
+    // 1. Extract potential rows from various JSON structures
+    let potentialRows: any[] = [];
     
-    // Normalização da estrutura de entrada (Array de Objetos ou Array de Arrays)
     if (Array.isArray(rawData)) {
-        // Verifica se é uma matriz 2D (values sem headers) ou lista de objetos
-        if (rawData.length > 0 && Array.isArray(rawData[0])) {
-            // É uma matriz 2D. A primeira linha são os headers.
-            const headers = rawData[0].map((h: any) => String(h));
-            const dataRows = rawData.slice(1);
-            
-            rows = dataRows.map((rowArray: any[]) => {
-                const obj: any = {};
-                headers.forEach((header: string, index: number) => {
-                    obj[header] = rowArray[index];
-                });
-                return obj;
-            });
-        } else {
-            // Já é lista de objetos
-            rows = rawData;
-        }
+        potentialRows = rawData;
     } else if (typeof rawData === 'object' && rawData !== null) {
-         const arrayProp = Object.values(rawData).find(val => Array.isArray(val));
-         if (arrayProp) {
-             rows = arrayProp as any[];
-         } else {
-             rows = Object.values(rawData);
-         }
+        // Try to find an array property (like 'data', 'values', 'items', 'records')
+        // Or use Object.values if it looks like a keyed list
+        const arrayProp = Object.values(rawData).find(val => Array.isArray(val));
+        if (arrayProp) {
+            potentialRows = arrayProp as any[];
+        } else {
+            // Fallback: maybe the object itself is a map of ID -> Object
+            potentialRows = Object.values(rawData);
+        }
     }
 
-    if (rows.length === 0) return {};
+    if (potentialRows.length === 0) return {};
+
+    // 2. Normalize to List of Objects (Handle 2D Arrays vs Objects)
+    let processedRows: any[] = [];
+
+    // Check if it's a 2D array (list of lists) - Common in Sheets API values
+    if (potentialRows.length > 0 && Array.isArray(potentialRows[0])) {
+        // It's headers + values
+        const headers = potentialRows[0].map((h: any) => String(h));
+        const dataLines = potentialRows.slice(1);
+        
+        processedRows = dataLines.map((line: any[]) => {
+            const obj: any = {};
+            headers.forEach((h, i) => {
+                // Handle case where row might be shorter than headers
+                obj[h] = line[i] !== undefined ? line[i] : ''; 
+            });
+            return obj;
+        });
+    } else {
+        // It's already a list of objects
+        processedRows = potentialRows;
+    }
 
     const normalizedData: Record<string, DayData> = {};
 
-    rows.forEach((row: any) => {
+    processedRows.forEach((row: any) => {
         if (!row || typeof row !== 'object') return;
 
         // Cria um mapa de chaves normalizadas para facilitar a busca
-        // Ex: "Pontos Total" -> "pontostotal", "Data" -> "data", "vacum" -> "vacum"
+        // Ex: "Pontos Total" -> "pontostotal", "Data" -> "data", "minoxidil_1" -> "minoxidil1"
         const rowKeys = Object.keys(row);
         const normalizedRowMap: Record<string, any> = {};
         
@@ -128,32 +140,33 @@ export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<st
         
         let dateKey = '';
         
-        try {
-            if (rawDate) {
-                // Se vier do Excel/Sheets as vezes vem como número serial, mas assumindo string YYYY-MM-DD do print
-                if (typeof rawDate === 'string') {
-                    if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-                        dateKey = rawDate;
-                    } else if (rawDate.includes('T')) {
-                        dateKey = rawDate.split('T')[0];
-                    } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(rawDate)) {
-                        const [d, m, y] = rawDate.split('/');
-                        dateKey = `${y}-${m}-${d}`; // Converte para ISO
-                    } else {
-                         // Tenta converter data genérica
-                         const d = new Date(rawDate);
-                         if (!isNaN(d.getTime())) dateKey = d.toISOString().split('T')[0];
-                    }
+        if (rawDate) {
+            if (typeof rawDate === 'string') {
+                const cleanDate = rawDate.trim();
+                if (/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
+                    dateKey = cleanDate;
+                } else if (cleanDate.includes('T')) {
+                    dateKey = cleanDate.split('T')[0];
+                } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(cleanDate)) {
+                    const [d, m, y] = cleanDate.split('/');
+                    dateKey = `${y}-${m}-${d}`; // ISO
+                } else {
+                     const d = new Date(cleanDate);
+                     if (!isNaN(d.getTime())) dateKey = d.toISOString().split('T')[0];
                 }
+            } else if (typeof rawDate === 'number') {
+                 // Handle Excel Serial Date if necessary (unlikely via JSON but possible)
+                 // 25569 is offset for 1970-01-01
+                 if (rawDate > 40000) { 
+                    const d = new Date((rawDate - 25569) * 86400 * 1000);
+                    if (!isNaN(d.getTime())) dateKey = d.toISOString().split('T')[0];
+                 }
             }
-        } catch (e) {
-            console.warn("Erro ao processar data:", rawDate);
         }
 
         if (!dateKey) return; // Pula linha se não tiver data válida
 
         // 2. Encontrar Pontos
-        // Busca 'pontostotal', 'totalpoints', 'pontos'
         const pointsVal = normalizedRowMap['pontostotal'] || normalizedRowMap['totalpoints'] || normalizedRowMap['pontos'];
         const points = Number(pointsVal) || 0;
 
