@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, DownloadCloud } from 'lucide-react';
+import { Sun, Sunset, Moon, CheckCircle, Circle, Zap, Loader2, Save, RotateCcw, Calendar, CloudCheck, Cloud } from 'lucide-react';
 import { Task, Period, DayData } from './types';
 import { INITIAL_TASKS, TOTAL_POSSIBLE_POINTS } from './constants';
 import { getStoredData, saveStoredData, syncWithCloud, loadFromCloud } from './services/storageService';
@@ -13,17 +13,42 @@ const App: React.FC = () => {
   const [currentDate, setCurrentDate] = useState<string>('');
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [isLoadingCloud, setIsLoadingCloud] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
 
-  // Initialize
+  // Initialize & Auto-Sync
   useEffect(() => {
-    const today = new Date().toISOString().split('T')[0];
-    setCurrentDate(today);
-    
-    const storedHistory = getStoredData();
-    setHistory(storedHistory);
+    const init = async () => {
+      const today = new Date().toISOString().split('T')[0];
+      setCurrentDate(today);
+      
+      // 1. Load Local Data immediately for speed
+      const storedHistory = getStoredData();
+      setHistory(storedHistory);
+      
+      // Initial render with local data
+      loadTasksForDate(today, storedHistory);
 
-    loadTasksForDate(today, storedHistory);
+      // 2. Fetch from Cloud in background
+      try {
+        const result = await loadFromCloud();
+        
+        if (result.success && result.data) {
+          // Merge: Cloud data overwrites local if there's a conflict
+          const mergedHistory = { ...storedHistory, ...result.data };
+          setHistory(mergedHistory);
+          saveStoredData(mergedHistory);
+          
+          // Update view again with cloud data
+          loadTasksForDate(today, mergedHistory);
+        }
+      } catch (e) {
+        console.error("Auto-sync failed", e);
+      } finally {
+        setIsInitialLoading(false);
+      }
+    };
+
+    init();
   }, []);
 
   const loadTasksForDate = (date: string, currentHistory: Record<string, DayData>) => {
@@ -72,22 +97,34 @@ const App: React.FC = () => {
     saveStoredData(newHistory);
   };
 
-  const handleResetDay = () => {
+  const handleResetDay = async () => {
     if (confirm('Tem certeza que deseja resetar os dados deste dia?')) {
+      setIsSyncing(true); // Show saving spinner during reset
+      
+      // 1. Reset State
       const resetTasks = tasks.map(t => ({ ...t, completed: false }));
       setTasks(resetTasks);
       
-      // Remove from history or update to 0
-      const newHistory = {
-        ...history,
-        [currentDate]: {
+      // 2. Prepare Empty Data
+      const emptyDayData: DayData = {
           date: currentDate,
           totalPoints: 0,
           tasks: resetTasks.reduce((acc, t) => ({ ...acc, [t.id]: false }), {})
-        }
+      };
+
+      // 3. Update Local
+      const newHistory = {
+        ...history,
+        [currentDate]: emptyDayData
       };
       setHistory(newHistory);
       saveStoredData(newHistory);
+
+      // 4. Force Sync to Cloud (Critical Fix)
+      // We must tell Supabase that this day is now empty, otherwise auto-sync will bring back old data
+      await syncWithCloud(emptyDayData);
+      
+      setIsSyncing(false);
     }
   };
 
@@ -104,35 +141,9 @@ const App: React.FC = () => {
     setIsSyncing(false);
 
     if (success) {
-        // Optional: Trigger a tiny success visual if needed, but alert works for now
-        alert(`Dados do dia ${currentDate.split('-').reverse().join('/')} salvos no Supabase!`);
+        // Subtle feedback
     } else {
-        alert("Erro na sincronização. Verifique o console.");
-    }
-  };
-
-  const handleDownloadCloud = async () => {
-    if (!confirm("Isso irá buscar o histórico do banco de dados (Supabase). Dados locais de dias conflitantes serão atualizados. Continuar?")) {
-        return;
-    }
-
-    setIsLoadingCloud(true);
-    const result = await loadFromCloud();
-    setIsLoadingCloud(false);
-
-    if (result.success && result.data) {
-        // Merge cloud data with local history (Cloud wins conflicts)
-        const mergedHistory = { ...history, ...result.data };
-        setHistory(mergedHistory);
-        saveStoredData(mergedHistory);
-        
-        // Refresh current view if the current date was affected
-        loadTasksForDate(currentDate, mergedHistory);
-        
-        const daysCount = Object.keys(result.data).length;
-        alert(result.message);
-    } else {
-        alert(`Erro: ${result.message}\n${result.error || ''}`);
+        alert("Erro na sincronização. Verifique sua conexão.");
     }
   };
 
@@ -146,7 +157,18 @@ const App: React.FC = () => {
         {/* Header */}
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight text-white">Desafio 30 Dias</h1>
+            <div className="flex items-center gap-3">
+              <h1 className="text-3xl font-bold tracking-tight text-white">Desafio 30 Dias</h1>
+              {/* Cloud Status Indicator */}
+              <div className="mt-1" title={isInitialLoading ? "Baixando dados..." : "Sincronizado"}>
+                 {isInitialLoading ? (
+                    <Loader2 className="w-4 h-4 text-slate-500 animate-spin" />
+                 ) : (
+                    <CloudCheck className="w-5 h-5 text-emerald-500/50" />
+                 )}
+              </div>
+            </div>
+            
             <div className="flex items-center gap-2 mt-2 bg-slate-800 p-1.5 rounded-lg border border-slate-700 w-fit">
               <Calendar className="w-4 h-4 text-slate-400 ml-1" />
               <input 
@@ -158,16 +180,7 @@ const App: React.FC = () => {
             </div>
           </div>
           <div className="flex gap-2 w-full md:w-auto">
-            <button 
-                onClick={handleDownloadCloud}
-                disabled={isLoadingCloud}
-                className="flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium transition-all border border-slate-600 disabled:opacity-50"
-                title="Baixar histórico do Supabase"
-            >
-                 {isLoadingCloud ? <Loader2 className="w-5 h-5 animate-spin" /> : <DownloadCloud className="w-5 h-5" />}
-                 <span className="hidden md:inline">Restaurar</span>
-            </button>
-
+            
             <button 
                 onClick={handleSync}
                 disabled={isSyncing}
