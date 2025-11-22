@@ -46,154 +46,189 @@ const normalizeBoolean = (value: any): boolean => {
     if (typeof value === 'number') return value === 1;
     if (typeof value === 'string') {
         const lower = value.toLowerCase().trim();
-        // Adicionado suporte explícito para Sim/Não e variações
         return ['sim', 's', 'true', 'yes', 'y', 'verdadeiro', '1'].includes(lower);
     }
     return false;
 };
 
-const normalizeKey = (key: string): string => {
-    if (!key) return '';
-    // Remove accents, special chars, spaces, underscores, lower case
-    return key.toString().toLowerCase()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
-        .replace(/[^a-z0-9]/g, ""); // keep only alphanumeric
+// Fuzzy matcher: removes non-alphanumeric to compare "Minoxidil 1" with "minoxidil_1"
+const fuzzyMatch = (key1: string, key2: string): boolean => {
+    if (!key1 || !key2) return false;
+    const n1 = key1.toString().toLowerCase().replace(/[^a-z0-9]/g, "");
+    const n2 = key2.toString().toLowerCase().replace(/[^a-z0-9]/g, "");
+    return n1 === n2;
 };
 
-export const loadFromGoogleSheets = async (scriptUrl: string): Promise<Record<string, DayData> | null> => {
-  if (!scriptUrl) return null;
+const looksLikeDate = (val: any): boolean => {
+    if (!val) return false;
+    if (typeof val === 'number' && val > 40000) return true; 
+    if (typeof val !== 'string') return false;
+    const s = val.trim();
+    return /^\d{4}-\d{2}-\d{2}/.test(s) || /^\d{2}\/\d{2}\/\d{4}/.test(s);
+};
+
+interface LoadResult {
+    success: boolean;
+    data: Record<string, DayData> | null;
+    message: string;
+    debug?: string;
+}
+
+// Diagnostic function to help user debug the connection
+export const diagnoseSheetConnection = async (scriptUrl: string): Promise<any> => {
+    try {
+        const response = await fetch(scriptUrl);
+        const text = await response.text();
+        
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch (e) {
+            return {
+                status: response.status,
+                error: "Não foi possível ler o JSON. A URL pode estar retornando HTML (página de login ou erro).",
+                rawPreview: text.substring(0, 200)
+            };
+        }
+
+        let rows: any[] = [];
+        if (Array.isArray(json)) rows = json;
+        else if (typeof json === 'object' && json.data && Array.isArray(json.data)) rows = json.data;
+        else if (typeof json === 'object') rows = Object.values(json).filter(v => Array.isArray(v)).flat();
+        else rows = [json];
+
+        return {
+            status: response.status,
+            rowCount: rows.length,
+            headersDetected: rows.length > 0 ? Object.keys(rows[0]) : [],
+            firstRowSample: rows.length > 0 ? rows[0] : null,
+            rawStructure: Array.isArray(json) ? "Array" : "Object"
+        };
+    } catch (error: any) {
+        return { error: error.message };
+    }
+};
+
+export const loadFromGoogleSheets = async (scriptUrl: string): Promise<LoadResult> => {
+  if (!scriptUrl) return { success: false, data: null, message: "URL não configurada." };
 
   try {
-    console.log("Iniciando fetch da URL:", scriptUrl);
     const response = await fetch(scriptUrl);
-    
-    if (!response.ok) {
-        throw new Error(`Network response was not ok: ${response.statusText}`);
-    }
+    if (!response.ok) return { success: false, data: null, message: `Erro HTTP: ${response.status}` };
 
-    let rawData = await response.json();
+    const rawData = await response.json();
     
-    if (rawData && rawData.error) {
-        console.error("Google Script Error:", rawData.error);
-        return null;
-    }
-
-    // 1. Extract potential rows from various JSON structures
     let potentialRows: any[] = [];
-    
-    if (Array.isArray(rawData)) {
-        potentialRows = rawData;
-    } else if (typeof rawData === 'object' && rawData !== null) {
-        // Try to find an array property (like 'data', 'values', 'items', 'records')
-        // Or use Object.values if it looks like a keyed list
-        const arrayProp = Object.values(rawData).find(val => Array.isArray(val));
-        if (arrayProp) {
-            potentialRows = arrayProp as any[];
-        } else {
-            // Fallback: maybe the object itself is a map of ID -> Object
-            potentialRows = Object.values(rawData);
-        }
+    if (Array.isArray(rawData)) potentialRows = rawData;
+    else if (rawData && typeof rawData === 'object') {
+         // Try to find the array inside the object
+         const possibleArray = Object.values(rawData).find(v => Array.isArray(v));
+         if (possibleArray) potentialRows = possibleArray as any[];
+         else potentialRows = [rawData]; // Maybe it's a single object?
     }
 
-    if (potentialRows.length === 0) return {};
+    if (!potentialRows.length) return { success: false, data: null, message: "Planilha vazia ou formato inválido." };
 
-    // 2. Normalize to List of Objects (Handle 2D Arrays vs Objects)
-    let processedRows: any[] = [];
-
-    // Check if it's a 2D array (list of lists) - Common in Sheets API values
-    if (potentialRows.length > 0 && Array.isArray(potentialRows[0])) {
-        // It's headers + values
-        const headers = potentialRows[0].map((h: any) => String(h));
-        const dataLines = potentialRows.slice(1);
-        
-        processedRows = dataLines.map((line: any[]) => {
-            const obj: any = {};
-            headers.forEach((h, i) => {
-                // Handle case where row might be shorter than headers
-                obj[h] = line[i] !== undefined ? line[i] : ''; 
-            });
-            return obj;
-        });
-    } else {
-        // It's already a list of objects
-        processedRows = potentialRows;
+    // Normalize rows if they are arrays (headers in row 0) vs objects
+    let processedRows = potentialRows;
+    if (Array.isArray(potentialRows[0])) {
+         const headers = potentialRows[0].map(String);
+         processedRows = potentialRows.slice(1).map((row: any[]) => {
+             const obj: any = {};
+             headers.forEach((h, i) => obj[h] = row[i]);
+             return obj;
+         });
     }
+
+    if (processedRows.length === 0) return { success: false, data: null, message: "Sem dados para processar." };
 
     const normalizedData: Record<string, DayData> = {};
+    const firstRow = processedRows[0];
+    const rowKeys = Object.keys(firstRow);
 
-    processedRows.forEach((row: any) => {
-        if (!row || typeof row !== 'object') return;
-
-        // Cria um mapa de chaves normalizadas para facilitar a busca
-        // Ex: "Pontos Total" -> "pontostotal", "Data" -> "data", "minoxidil_1" -> "minoxidil1"
-        const rowKeys = Object.keys(row);
-        const normalizedRowMap: Record<string, any> = {};
-        
-        rowKeys.forEach(key => {
-            const cleanKey = normalizeKey(key);
-            normalizedRowMap[cleanKey] = row[key];
-        });
-
-        // 1. Encontrar a Data
-        // Procura por chaves comuns: 'data', 'date', 'dia'
-        let rawDate = normalizedRowMap['data'] || normalizedRowMap['date'] || normalizedRowMap['dia'];
-        
-        let dateKey = '';
-        
-        if (rawDate) {
-            if (typeof rawDate === 'string') {
-                const cleanDate = rawDate.trim();
-                if (/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
-                    dateKey = cleanDate;
-                } else if (cleanDate.includes('T')) {
-                    dateKey = cleanDate.split('T')[0];
-                } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(cleanDate)) {
-                    const [d, m, y] = cleanDate.split('/');
-                    dateKey = `${y}-${m}-${d}`; // ISO
-                } else {
-                     const d = new Date(cleanDate);
-                     if (!isNaN(d.getTime())) dateKey = d.toISOString().split('T')[0];
-                }
-            } else if (typeof rawDate === 'number') {
-                 // Handle Excel Serial Date if necessary (unlikely via JSON but possible)
-                 // 25569 is offset for 1970-01-01
-                 if (rawDate > 40000) { 
-                    const d = new Date((rawDate - 25569) * 86400 * 1000);
-                    if (!isNaN(d.getTime())) dateKey = d.toISOString().split('T')[0];
-                 }
+    // Detect Date Column
+    let dateKey = rowKeys.find(k => k.toLowerCase() === 'data' || k.toLowerCase() === 'date' || k.toLowerCase() === 'dia');
+    
+    // Fallback: check values
+    if (!dateKey) {
+        for (const k of rowKeys) {
+            if (looksLikeDate(firstRow[k])) {
+                dateKey = k;
+                break;
             }
         }
+    }
 
-        if (!dateKey) return; // Pula linha se não tiver data válida
+    if (!dateKey) {
+        return { 
+            success: false, 
+            data: null, 
+            message: "Coluna de Data não encontrada.",
+            debug: `Chaves encontradas: ${rowKeys.join(', ')}. Nenhuma parece ser uma data.`
+        };
+    }
 
-        // 2. Encontrar Pontos
-        const pointsVal = normalizedRowMap['pontostotal'] || normalizedRowMap['totalpoints'] || normalizedRowMap['pontos'];
-        const points = Number(pointsVal) || 0;
+    processedRows.forEach((row: any) => {
+        // Parse Date
+        const valDate = row[dateKey!];
+        let dateStr = '';
+        
+        if (typeof valDate === 'string') {
+             // Try to grab YYYY-MM-DD
+             const match = valDate.match(/\d{4}-\d{2}-\d{2}/);
+             if (match) dateStr = match[0];
+             else {
+                 // Try DD/MM/YYYY
+                 const brMatch = valDate.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                 if (brMatch) dateStr = `${brMatch[3]}-${brMatch[2]}-${brMatch[1]}`;
+             }
+        } else if (typeof valDate === 'number' && valDate > 40000) {
+            // Excel date
+            const d = new Date((valDate - 25569) * 86400 * 1000);
+            dateStr = d.toISOString().split('T')[0];
+        }
 
-        // 3. Mapear Tarefas
-        const taskMap: Record<string, boolean> = {};
+        // Fallback for date object
+        if (!dateStr && valDate) {
+            const d = new Date(valDate);
+            if (!isNaN(d.getTime())) dateStr = d.toISOString().split('T')[0];
+        }
+
+        if (!dateStr) return;
+
+        // Parse Tasks
+        const tasksMap: Record<string, boolean> = {};
+        const rowKeys = Object.keys(row);
 
         INITIAL_TASKS.forEach(task => {
-            // Normaliza o ID da tarefa (ex: minoxidil_1 -> minoxidil1) para busca
-            const searchKey = normalizeKey(task.id);
-            
-            // Tenta achar o valor usando a chave normalizada
-            const val = normalizedRowMap[searchKey];
-            
-            taskMap[task.id] = normalizeBoolean(val);
+            // Find key in row that fuzzy matches task.id
+            // task.id = "minoxidil_1" -> row key might be "minoxidil_1" or "Minoxidil 1" or "minoxidil1"
+            const matchingKey = rowKeys.find(k => fuzzyMatch(k, task.id));
+            if (matchingKey) {
+                tasksMap[task.id] = normalizeBoolean(row[matchingKey]);
+            } else {
+                tasksMap[task.id] = false;
+            }
         });
 
-        normalizedData[dateKey] = {
-            date: dateKey,
-            totalPoints: points,
-            tasks: taskMap
+        // Parse Points
+        const pointKey = rowKeys.find(k => k.toLowerCase().includes('pontos') || k.toLowerCase().includes('total'));
+        const points = pointKey ? Number(row[pointKey]) : 0;
+
+        normalizedData[dateStr] = {
+            date: dateStr,
+            totalPoints: isNaN(points) ? 0 : points,
+            tasks: tasksMap
         };
     });
 
-    console.log(`Sucesso! ${Object.keys(normalizedData).length} dias processados.`);
-    return normalizedData;
-  } catch (error) {
-    console.error("Load failed full error:", error);
-    return null;
+    return { 
+        success: true, 
+        data: normalizedData, 
+        message: `${Object.keys(normalizedData).length} dias processados.` 
+    };
+
+  } catch (error: any) {
+    return { success: false, data: null, message: "Erro ao processar JSON.", debug: error.message };
   }
 };

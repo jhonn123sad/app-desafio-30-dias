@@ -126,27 +126,30 @@ const App: React.FC = () => {
     }
 
     setIsLoadingCloud(true);
-    const cloudData = await loadFromGoogleSheets(GOOGLE_SCRIPT_URL);
+    const result = await loadFromGoogleSheets(GOOGLE_SCRIPT_URL);
     setIsLoadingCloud(false);
 
-    if (cloudData && Object.keys(cloudData).length > 0) {
+    if (result.success && result.data && Object.keys(result.data).length > 0) {
         // Merge cloud data with local history (Cloud wins conflicts)
-        const mergedHistory = { ...history, ...cloudData };
+        const mergedHistory = { ...history, ...result.data };
         setHistory(mergedHistory);
         saveStoredData(mergedHistory);
         
         // Refresh current view if the current date was affected
         loadTasksForDate(currentDate, mergedHistory);
         
-        const daysCount = Object.keys(cloudData).length;
+        const daysCount = Object.keys(result.data).length;
         alert(`Sucesso! ${daysCount} dias recuperados da planilha.`);
     } else {
-        // Se retornou null ou vazio
-        if (cloudData === null) {
-             alert("Erro de conexão com o Google Sheets. Verifique se o link do script está correto e acessível.");
-        } else {
-             alert("Conexão realizada, mas nenhum registro válido foi encontrado.\n\nVerificamos sua planilha mas não conseguimos identificar a coluna 'Data' ou as linhas de dados.\n\nDica: Verifique se a coluna A se chama 'Data' e se as datas estão no formato AAAA-MM-DD.");
+        // Tratamento de erro detalhado
+        let errorMsg = "Falha ao ler dados.";
+        if (result.message) errorMsg = result.message;
+        
+        if (result.debug) {
+             errorMsg += `\n\nDetalhes técnicos:\n${result.debug}`;
         }
+        
+        alert(errorMsg);
     }
   };
 
