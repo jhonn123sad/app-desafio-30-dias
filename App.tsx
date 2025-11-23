@@ -1,22 +1,24 @@
 
 import React, { useState, useEffect } from 'react';
-import { Sun, Sunset, Moon, CheckCircle, Circle, RotateCcw, Calendar, Edit3, LogOut, Loader2 } from 'lucide-react';
-import { Task, Period, DayData, TaskDefinition, User } from './types';
+import { Sun, Sunset, Moon, CheckCircle, Circle, RotateCcw, Calendar, Edit3, Save, Loader2, Cloud, WifiOff, AlertTriangle, Database, Check } from 'lucide-react';
+import { Task, Period, DayData, TaskDefinition } from './types';
 import { ProgressChart } from './components/Chart';
 import { TaskEditor } from './components/TaskEditor';
 import { ConfigModal } from './components/ConfigModal';
+import { authenticateSilently } from './services/authService';
 import { 
-  getStoredTaskDefinitions, 
-  saveStoredTaskDefinitions, 
-  getStoredHistory, 
-  saveDayProgress, 
-  clearAllData 
-} from './services/storageService';
+  getUserTaskDefinitions, 
+  saveUserTaskDefinitions, 
+  getMonthHistory,
+  saveDayProgress
+} from './services/supabaseService';
+import { INITIAL_TASKS } from './constants';
 
 const App: React.FC = () => {
   // Data State
+  const [userId, setUserId] = useState<string | null>(null);
   const [taskDefinitions, setTaskDefinitions] = useState<TaskDefinition[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]); // Current day's tasks status
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [history, setHistory] = useState<Record<string, DayData>>({});
   const [currentDate, setCurrentDate] = useState<string>('');
   
@@ -25,45 +27,94 @@ const App: React.FC = () => {
   const [isResetDayModalOpen, setIsResetDayModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'offline' | 'error'>('connected');
+  const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
 
   // 1. Initial Load
   useEffect(() => {
-    const init = () => {
-      const today = new Date().toISOString().split('T')[0];
-      setCurrentDate(today);
+    const init = async () => {
+      try {
+        setIsLoading(true);
+        
+        let activeUserId: string;
 
-      // Load Structure (Definitions)
-      const defs = getStoredTaskDefinitions();
-      setTaskDefinitions(defs);
+        try {
+            const user = await authenticateSilently();
+            activeUserId = user?.id || 'local_fallback_id';
+            setConnectionStatus('connected');
+        } catch (authErr: any) {
+            console.warn("Auth failed, using offline ID:", authErr.message);
+            // If auth fails (e.g. Email Confirmation required), we use a consistent local ID
+            // to ensure the app works locally without blocking the user.
+            let localId = localStorage.getItem('rt_local_fallback_id');
+            if (!localId) {
+                localId = 'local_' + Date.now().toString(36);
+                localStorage.setItem('rt_local_fallback_id', localId);
+            }
+            activeUserId = localId;
+            setConnectionStatus('offline');
+            if (authErr.message === "CONFIRMATION_REQUIRED") {
+                setConnectionMessage("Supabase: Confirmação de email necessária para sincronização.");
+            } else {
+                setConnectionMessage("Modo Offline: Sincronização indisponível.");
+            }
+        }
 
-      // Load History
-      const hist = getStoredHistory();
-      setHistory(hist);
+        setUserId(activeUserId);
+        const today = new Date().toISOString().split('T')[0];
+        setCurrentDate(today);
 
-      // Construct Today's View
-      constructDayView(today, defs, hist);
-      setIsLoading(false);
+        // Load Data (Try Supabase even if auth failed, in case RLS is disabled)
+        try {
+            const [defs, hist] = await Promise.all([
+                getUserTaskDefinitions(activeUserId),
+                getMonthHistory(activeUserId)
+            ]);
+            
+            const activeDefs = defs.length > 0 ? defs : INITIAL_TASKS.map(t => ({
+                id: t.id,
+                label: t.label,
+                period: t.period,
+                points: t.points
+            }));
+
+            setTaskDefinitions(activeDefs);
+            setHistory(hist);
+            constructDayView(today, activeDefs, hist);
+        } catch (dbError: any) {
+            console.warn("Data load failed, using defaults:", dbError);
+            // Fallback to defaults
+            const defaultDefs = INITIAL_TASKS.map(t => ({
+                id: t.id,
+                label: t.label,
+                period: t.period,
+                points: t.points
+            }));
+            setTaskDefinitions(defaultDefs);
+            constructDayView(today, defaultDefs, {});
+        }
+
+      } catch (err: any) {
+        console.error("Critical Init Error:", err);
+      } finally {
+        setIsLoading(false);
+      }
     };
     init();
   }, []);
 
-  // 2. Construct Day View (Combine Definitions with Logged Progress)
   const constructDayView = (date: string, definitions: TaskDefinition[], currentHistory: Record<string, DayData>) => {
     const dayData = currentHistory[date];
-    
     const constructedTasks: Task[] = definitions.map(def => ({
         id: def.id,
         label: def.label,
         period: def.period,
         points: def.points,
-        // Check if completed in history. If history doesn't exist for today, false.
         completed: dayData ? !!dayData.tasks[def.id] : false
     }));
-
     setTasks(constructedTasks);
   };
-
-  // Handlers
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newDate = e.target.value;
@@ -71,7 +122,9 @@ const App: React.FC = () => {
     constructDayView(newDate, taskDefinitions, history);
   };
 
-  const handleToggleTask = (taskId: string) => {
+  const handleToggleTask = async (taskId: string) => {
+    if (!userId) return;
+
     // Optimistic Update
     const newTasks = tasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t);
     setTasks(newTasks);
@@ -85,24 +138,66 @@ const App: React.FC = () => {
         tasks: taskMap
     };
 
-    // Update History State & Storage
     const newHistory = { ...history, [currentDate]: dayData };
     setHistory(newHistory);
-    saveDayProgress(dayData);
+
+    // Save to backend
+    if (connectionStatus === 'connected') {
+        setIsSyncing(true);
+        try {
+            await saveDayProgress(userId, dayData);
+        } catch (error) {
+            console.error("Sync error:", error);
+            setConnectionStatus('error');
+        } finally {
+            setIsSyncing(false);
+        }
+    }
+  };
+
+  const handleManualSave = async () => {
+    if (!userId) return;
+    setIsSyncing(true);
+    try {
+        const currentDayData = history[currentDate] || { 
+            date: currentDate, 
+            totalPoints: tasks.reduce((acc, t) => t.completed ? acc + t.points : acc, 0),
+            tasks: tasks.reduce((acc, t) => ({ ...acc, [t.id]: t.completed }), {})
+        };
+        await saveDayProgress(userId, currentDayData);
+        const hist = await getMonthHistory(userId);
+        setHistory(hist);
+        alert("Dados salvos com sucesso!");
+        setConnectionStatus('connected');
+    } catch (error) {
+        alert("Erro ao salvar: Verifique sua conexão ou configurações do Supabase.");
+        setConnectionStatus('error');
+    } finally {
+        setIsSyncing(false);
+    }
   };
 
   const handleSaveDefinitions = async (newDefinitions: TaskDefinition[]) => {
-    // 1. Save structure to Local Storage
-    saveStoredTaskDefinitions(newDefinitions);
-    
-    // 2. Update local state
+    if (!userId) return;
     setTaskDefinitions(newDefinitions);
-    
-    // 3. Re-render current day with new structure (keeping existing checkmarks if IDs match)
     constructDayView(currentDate, newDefinitions, history);
+    setIsEditorOpen(false);
+
+    if (connectionStatus === 'connected') {
+        setIsSyncing(true);
+        try {
+            await saveUserTaskDefinitions(userId, newDefinitions);
+        } catch (error: any) {
+            alert("Aviso: Não foi possível salvar as definições na nuvem.");
+            setConnectionStatus('error');
+        } finally {
+            setIsSyncing(false);
+        }
+    }
   };
 
-  const confirmResetCurrentDay = () => {
+  const confirmResetCurrentDay = async () => {
+    if (!userId) return;
     setIsResetDayModalOpen(false);
     
     const resetTasks = tasks.map(t => ({ ...t, completed: false }));
@@ -114,13 +209,19 @@ const App: React.FC = () => {
         tasks: {}
     };
 
-    const newHistory = { ...history, [currentDate]: dayData };
-    setHistory(newHistory);
-    saveDayProgress(dayData);
+    setHistory({ ...history, [currentDate]: dayData });
+    
+    if (connectionStatus === 'connected') {
+        setIsSyncing(true);
+        try {
+            await saveDayProgress(userId, dayData);
+        } catch(e) { console.error(e); }
+        setIsSyncing(false);
+    }
   };
 
   const handleFullReset = async () => {
-    clearAllData();
+    localStorage.clear();
     window.location.reload();
   };
 
@@ -132,8 +233,8 @@ const App: React.FC = () => {
 
   if (isLoading) {
     return (
-        <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-            <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
+        <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-4">
+            <Loader2 className="w-10 h-10 text-emerald-500 animate-spin" />
         </div>
     );
   }
@@ -151,25 +252,41 @@ const App: React.FC = () => {
                 </div>
                 <div>
                     <h1 className="text-xl font-bold tracking-tight text-white">Routine Tracker</h1>
-                    <p className="text-xs text-slate-500 font-mono flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                        Modo Local • Offline
-                    </p>
+                    <div className="flex items-center gap-2 text-xs font-mono mt-1">
+                        {/* Status Indicator */}
+                        <div className={`w-2 h-2 rounded-full ${
+                            connectionStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 
+                            connectionStatus === 'error' ? 'bg-red-500' : 'bg-yellow-500'
+                        }`} />
+                        <span className="text-slate-500">
+                            {isSyncing ? 'Sincronizando...' : connectionStatus === 'connected' ? 'Online' : 'Offline'}
+                        </span>
+                        {connectionMessage && (
+                            <div className="group relative ml-1">
+                                <AlertTriangle className="w-3 h-3 text-slate-600 cursor-help" />
+                                <div className="absolute left-0 top-full mt-1 w-64 bg-slate-800 border border-slate-700 p-2 rounded text-[10px] text-slate-300 shadow-xl hidden group-hover:block z-50">
+                                    {connectionMessage}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
+            
             <button 
-                onClick={() => setIsConfigModalOpen(true)}
-                className="text-slate-500 hover:text-white p-2 hover:bg-slate-800 rounded-lg transition-colors"
-                title="Configurações"
+                onClick={handleManualSave}
+                disabled={isSyncing}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-all"
             >
-                <LogOut className="w-5 h-5 rotate-180" />
+                {isSyncing ? <Loader2 className="w-4 h-4 animate-spin"/> : <Save className="w-4 h-4" />}
+                <span className="hidden sm:inline">Salvar</span>
             </button>
           </div>
 
           <div className="flex justify-between items-end flex-wrap gap-4">
             <div>
                 <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xs font-bold text-slate-500 uppercase">Data de hoje</span>
+                    <span className="text-xs font-bold text-slate-500 uppercase">Data</span>
                 </div>
                 <div className="flex items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700 w-fit shadow-sm">
                     <Calendar className="w-4 h-4 text-emerald-500 ml-1" />
@@ -192,10 +309,9 @@ const App: React.FC = () => {
                 </button>
                 <button 
                   onClick={() => setIsEditorOpen(true)}
-                  className="px-4 py-2.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-600/20 rounded-lg transition-colors flex items-center gap-2 font-semibold text-sm"
-                  title="Editar Rotina"
+                  className="px-4 py-2.5 bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 border border-indigo-600/20 rounded-lg transition-colors flex items-center gap-2 font-semibold text-sm"
                 >
-                  <Edit3 className="w-4 h-4" /> Editar Tarefas
+                  <Edit3 className="w-4 h-4" /> Tarefas
                 </button>
             </div>
           </div>
@@ -256,15 +372,6 @@ const App: React.FC = () => {
                 tasks={getTasksByPeriod(Period.NIGHT)}
                 onToggle={handleToggleTask}
             />
-            
-            {tasks.length === 0 && (
-                <div className="text-center py-12 border-2 border-dashed border-slate-800 rounded-xl">
-                    <p className="text-slate-500">Sua lista de tarefas está vazia.</p>
-                    <button onClick={() => setIsEditorOpen(true)} className="text-emerald-500 font-semibold mt-2 hover:underline">
-                        Criar tarefas agora
-                    </button>
-                </div>
-            )}
         </div>
 
       </div>

@@ -8,6 +8,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // --- Task Definitions Management ---
 
 export const getUserTaskDefinitions = async (userId: string): Promise<TaskDefinition[]> => {
+  if (!userId) return [];
+
   const { data, error } = await supabase
     .from('task_definitions')
     .select('*')
@@ -15,13 +17,19 @@ export const getUserTaskDefinitions = async (userId: string): Promise<TaskDefini
     .order('created_at', { ascending: true });
 
   if (error) {
-    console.error('Error fetching definitions:', error);
-    return [];
+    // Fix: properly log the error object so we can see what's wrong
+    console.warn('Supabase Error fetching definitions:', JSON.stringify(error, null, 2));
+    // Return empty to trigger default tasks fallback in UI
+    return []; 
   }
 
   // If no definitions exist (new user), seed with INITIAL_TASKS
   if (!data || data.length === 0) {
-    await seedInitialTasks(userId);
+    try {
+        await seedInitialTasks(userId);
+    } catch (e) {
+        console.warn("Seeding failed (likely RLS or offline), using memory defaults.", e);
+    }
     return INITIAL_TASKS.map(t => ({
         id: t.id,
         label: t.label,
@@ -47,20 +55,19 @@ const seedInitialTasks = async (userId: string) => {
   }));
 
   const { error } = await supabase.from('task_definitions').insert(tasksToInsert);
-  if (error) console.error("Error seeding tasks:", error);
+  if (error) throw error;
 };
 
 export const saveUserTaskDefinitions = async (userId: string, tasks: TaskDefinition[]) => {
   // Strategy: Delete all for user and re-insert (Simple sync)
-  // In a production app with huge data, we would diff/update, but for <50 tasks this is fine and robust.
-  
   const { error: deleteError } = await supabase
     .from('task_definitions')
     .delete()
     .eq('user_id', userId);
 
   if (deleteError) {
-    throw new Error("Falha ao limpar tarefas antigas: " + deleteError.message);
+    console.error("Error clearing old tasks:", JSON.stringify(deleteError));
+    throw new Error("Falha na sincronização (Delete).");
   }
 
   const tasksToInsert = tasks.map(t => ({
@@ -75,7 +82,8 @@ export const saveUserTaskDefinitions = async (userId: string, tasks: TaskDefinit
     .insert(tasksToInsert);
 
   if (insertError) {
-    throw new Error("Falha ao salvar novas tarefas: " + insertError.message);
+    console.error("Error inserting new tasks:", JSON.stringify(insertError));
+    throw new Error("Falha na sincronização (Insert).");
   }
 };
 
@@ -90,7 +98,7 @@ export const getDayProgress = async (userId: string, date: string): Promise<DayD
     .single();
 
   if (error && error.code !== 'PGRST116') { // PGRST116 is "not found"
-    console.error("Error fetching day:", error);
+    console.warn("Error fetching day:", JSON.stringify(error));
   }
 
   if (!data) return null;
@@ -116,7 +124,10 @@ export const getMonthHistory = async (userId: string): Promise<Record<string, Da
     .select('*')
     .eq('user_id', userId);
     
-  if (error) return {};
+  if (error) {
+    console.warn("Error fetching history:", JSON.stringify(error));
+    return {};
+  }
 
   const history: Record<string, DayData> = {};
   data.forEach((row: any) => {
@@ -149,5 +160,8 @@ export const saveDayProgress = async (userId: string, dayData: DayData) => {
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id, date' });
 
-  if (error) console.error("Error saving progress:", error);
+  if (error) {
+      console.error("Error saving progress:", JSON.stringify(error));
+      throw error;
+  }
 };
