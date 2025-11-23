@@ -17,9 +17,7 @@ export const getUserTaskDefinitions = async (userId: string): Promise<TaskDefini
     .order('created_at', { ascending: true });
 
   if (error) {
-    // Fix: properly log the error object so we can see what's wrong
     console.warn('Supabase Error fetching definitions:', JSON.stringify(error, null, 2));
-    // Return empty to trigger default tasks fallback in UI
     return []; 
   }
 
@@ -27,15 +25,19 @@ export const getUserTaskDefinitions = async (userId: string): Promise<TaskDefini
   if (!data || data.length === 0) {
     try {
         await seedInitialTasks(userId);
+        // FETCH AGAIN to get the generated UUIDs! 
+        // Returning INITIAL_TASKS directly causes ID mismatch between Frontend (static IDs) and Backend (UUIDs).
+        return getUserTaskDefinitions(userId);
     } catch (e) {
         console.warn("Seeding failed (likely RLS or offline), using memory defaults.", e);
+        // Only fallback to static IDs if DB is absolutely unreachable
+        return INITIAL_TASKS.map(t => ({
+          id: t.id,
+          label: t.label,
+          period: t.period,
+          points: t.points
+      }));
     }
-    return INITIAL_TASKS.map(t => ({
-        id: t.id,
-        label: t.label,
-        period: t.period,
-        points: t.points
-    }));
   }
 
   return data.map((d: any) => ({
@@ -59,7 +61,9 @@ const seedInitialTasks = async (userId: string) => {
 };
 
 export const saveUserTaskDefinitions = async (userId: string, tasks: TaskDefinition[]) => {
-  // Strategy: Delete all for user and re-insert (Simple sync)
+  // 1. Delete all existing definitions for this user
+  // We use this "Delete All + Insert All" strategy for simplicity, 
+  // BUT we must re-insert with the SAME IDs to preserve history.
   const { error: deleteError } = await supabase
     .from('task_definitions')
     .delete()
@@ -70,12 +74,19 @@ export const saveUserTaskDefinitions = async (userId: string, tasks: TaskDefinit
     throw new Error("Falha na sincronização (Delete).");
   }
 
-  const tasksToInsert = tasks.map(t => ({
-    user_id: userId,
-    label: t.label,
-    period: t.period,
-    points: t.points
-  }));
+  // 2. Prepare tasks for insertion, preserving IDs
+  const tasksToInsert = tasks.map(t => {
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t.id);
+    return {
+      user_id: userId,
+      // If it's a valid UUID, send it to preserve identity. 
+      // If it's a legacy ID or temp ID that isn't a UUID, let Supabase gen a new one (history might be lost for that specific task).
+      id: isUUID ? t.id : undefined, 
+      label: t.label,
+      period: t.period,
+      points: t.points
+    };
+  });
 
   const { error: insertError } = await supabase
     .from('task_definitions')

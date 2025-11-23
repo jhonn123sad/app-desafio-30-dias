@@ -10,6 +10,14 @@ interface TaskEditorProps {
   onSave: (tasks: TaskDefinition[]) => Promise<void>;
 }
 
+// Simple UUID generator for client-side IDs
+const generateUUID = () => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
+
 export const TaskEditor: React.FC<TaskEditorProps> = ({ isOpen, onClose, currentTasks, onSave }) => {
   const [tasks, setTasks] = useState<TaskDefinition[]>(currentTasks);
   const [newTaskName, setNewTaskName] = useState('');
@@ -30,10 +38,8 @@ export const TaskEditor: React.FC<TaskEditorProps> = ({ isOpen, onClose, current
     e.preventDefault();
     if (!newTaskName.trim()) return;
 
-    // Use a temp ID for UI, will be replaced by DB UUID on reload or handled by backend
-    // For now, simple random string is enough for UI key
     const newTask: TaskDefinition = {
-      id: `new_${Date.now()}`, 
+      id: generateUUID(), // Use real UUID so we can sync it reliably
       label: newTaskName,
       period: newTaskPeriod,
       points: newTaskPoints
@@ -198,7 +204,7 @@ export const TaskEditor: React.FC<TaskEditorProps> = ({ isOpen, onClose, current
                 className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-6 rounded-lg flex items-center gap-2 shadow-lg shadow-emerald-900/20 disabled:opacity-70 disabled:cursor-wait transition-all"
             >
                 {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                {isSaving ? 'Salvando...' : 'Salvar Definições'}
+                {isSaving ? 'Salvar Definições' : 'Salvar Definições'}
             </button>
         </div>
       </div>

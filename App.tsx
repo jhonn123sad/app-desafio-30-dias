@@ -12,6 +12,12 @@ import {
   getMonthHistory,
   saveDayProgress
 } from './services/supabaseService';
+import { 
+  getStoredTaskDefinitions, 
+  saveStoredTaskDefinitions, 
+  getStoredHistory, 
+  saveDayProgress as saveLocalDayProgress 
+} from './services/storageService';
 import { INITIAL_TASKS } from './constants';
 
 const App: React.FC = () => {
@@ -57,7 +63,7 @@ const App: React.FC = () => {
             if (authErr.message === "CONFIRMATION_REQUIRED") {
                 setConnectionMessage("Supabase: Confirmação de email necessária para sincronização.");
             } else {
-                setConnectionMessage("Modo Offline: Sincronização indisponível.");
+                setConnectionMessage("Sincronização temporariamente indisponível. Seus dados estão salvos neste dispositivo.");
             }
         }
 
@@ -65,34 +71,46 @@ const App: React.FC = () => {
         const today = new Date().toISOString().split('T')[0];
         setCurrentDate(today);
 
-        // Load Data (Try Supabase even if auth failed, in case RLS is disabled)
+        // Load Data: Try Supabase first, fallback to LocalStorage if offline/fail
         try {
+            // If offline, throw immediately to jump to catch
+            if (connectionStatus === 'offline') throw new Error("Offline mode");
+
             const [defs, hist] = await Promise.all([
                 getUserTaskDefinitions(activeUserId),
                 getMonthHistory(activeUserId)
             ]);
             
-            const activeDefs = defs.length > 0 ? defs : INITIAL_TASKS.map(t => ({
+            // If cloud returns empty definitions (but not error), it might be a new user. 
+            // Check local storage just in case we have unsynced changes.
+            const localDefs = getStoredTaskDefinitions();
+            const activeDefs = defs.length > 0 ? defs : (localDefs.length > 0 ? localDefs : INITIAL_TASKS.map(t => ({
                 id: t.id,
                 label: t.label,
                 period: t.period,
                 points: t.points
-            }));
+            })));
 
             setTaskDefinitions(activeDefs);
             setHistory(hist);
             constructDayView(today, activeDefs, hist);
         } catch (dbError: any) {
-            console.warn("Data load failed, using defaults:", dbError);
-            // Fallback to defaults
-            const defaultDefs = INITIAL_TASKS.map(t => ({
+            console.warn("Cloud load failed, loading from device:", dbError);
+            
+            // Fallback to LocalStorage
+            const localDefs = getStoredTaskDefinitions();
+            const localHistory = getStoredHistory(); // Note: getStoredHistory logic in storageService might need activeUserId filtering if multi-user, but usually it's single bucket in localstorage.
+            
+            const activeDefs = localDefs.length > 0 ? localDefs : INITIAL_TASKS.map(t => ({
                 id: t.id,
                 label: t.label,
                 period: t.period,
                 points: t.points
             }));
-            setTaskDefinitions(defaultDefs);
-            constructDayView(today, defaultDefs, {});
+            
+            setTaskDefinitions(activeDefs);
+            setHistory(localHistory);
+            constructDayView(today, activeDefs, localHistory);
         }
 
       } catch (err: any) {
@@ -102,7 +120,7 @@ const App: React.FC = () => {
       }
     };
     init();
-  }, []);
+  }, [connectionStatus]); // Re-run if status changes logic slightly, though mainly relies on internal flow
 
   const constructDayView = (date: string, definitions: TaskDefinition[], currentHistory: Record<string, DayData>) => {
     const dayData = currentHistory[date];
@@ -140,8 +158,11 @@ const App: React.FC = () => {
 
     const newHistory = { ...history, [currentDate]: dayData };
     setHistory(newHistory);
+    
+    // Always Save Locally first
+    saveLocalDayProgress(dayData);
 
-    // Save to backend
+    // Save to backend if connected
     if (connectionStatus === 'connected') {
         setIsSyncing(true);
         try {
@@ -164,13 +185,19 @@ const App: React.FC = () => {
             totalPoints: tasks.reduce((acc, t) => t.completed ? acc + t.points : acc, 0),
             tasks: tasks.reduce((acc, t) => ({ ...acc, [t.id]: t.completed }), {})
         };
-        await saveDayProgress(userId, currentDayData);
-        const hist = await getMonthHistory(userId);
-        setHistory(hist);
-        alert("Dados salvos com sucesso!");
-        setConnectionStatus('connected');
+        
+        saveLocalDayProgress(currentDayData);
+        
+        if (connectionStatus === 'connected') {
+            await saveDayProgress(userId, currentDayData);
+            const hist = await getMonthHistory(userId);
+            setHistory(hist);
+            alert("Dados sincronizados com a nuvem!");
+        } else {
+             alert("Dados salvos no dispositivo (Offline).");
+        }
     } catch (error) {
-        alert("Erro ao salvar: Verifique sua conexão ou configurações do Supabase.");
+        alert("Erro ao salvar: Verifique sua conexão.");
         setConnectionStatus('error');
     } finally {
         setIsSyncing(false);
@@ -179,16 +206,22 @@ const App: React.FC = () => {
 
   const handleSaveDefinitions = async (newDefinitions: TaskDefinition[]) => {
     if (!userId) return;
+    
+    // 1. Update State
     setTaskDefinitions(newDefinitions);
     constructDayView(currentDate, newDefinitions, history);
     setIsEditorOpen(false);
 
+    // 2. Save Locally (Always safe)
+    saveStoredTaskDefinitions(newDefinitions);
+
+    // 3. Try Cloud Sync
     if (connectionStatus === 'connected') {
         setIsSyncing(true);
         try {
             await saveUserTaskDefinitions(userId, newDefinitions);
         } catch (error: any) {
-            alert("Aviso: Não foi possível salvar as definições na nuvem.");
+            alert("Aviso: As alterações foram salvas neste dispositivo, mas houve um erro ao sincronizar com a nuvem.");
             setConnectionStatus('error');
         } finally {
             setIsSyncing(false);
@@ -210,6 +243,7 @@ const App: React.FC = () => {
     };
 
     setHistory({ ...history, [currentDate]: dayData });
+    saveLocalDayProgress(dayData);
     
     if (connectionStatus === 'connected') {
         setIsSyncing(true);
@@ -259,7 +293,7 @@ const App: React.FC = () => {
                             connectionStatus === 'error' ? 'bg-red-500' : 'bg-yellow-500'
                         }`} />
                         <span className="text-slate-500">
-                            {isSyncing ? 'Sincronizando...' : connectionStatus === 'connected' ? 'Online' : 'Offline'}
+                            {isSyncing ? 'Sincronizando...' : connectionStatus === 'connected' ? 'Online' : 'Armazenamento Local'}
                         </span>
                         {connectionMessage && (
                             <div className="group relative ml-1">
